@@ -5,6 +5,7 @@ from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.metrics import mean_squared_error, accuracy_score, r2_score
 from sklearn.preprocessing import LabelEncoder
+from sklearn.utils.validation import check_is_fitted
 import iisignature as ii
 import functools
 import inspect
@@ -83,6 +84,8 @@ class NadarayaWatsonSignature(BaseEstimator):
         value is ignored. If True, X0 must be passed to fit and predict, and the
         distance becomes |x0 - y0| + rho(x, y), with rho the chosen path metric.
         X0 is used as given (it is not rescaled in robust mode).
+    verbose : bool, optional (default=False)
+        Print progress (cross-validation results, selected hyperparameters).
     """
     
     # Grids used for hyperparameters that are not fixed and have no grid given
@@ -111,6 +114,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         initial_condition: bool = False,
         metric_choice: str = 'signature_metric',
         p_param: Optional[float] = 2,
+        verbose: bool = False,
     ):
         self.signature_level = signature_level
         self.bandwidth = bandwidth
@@ -131,40 +135,35 @@ class NadarayaWatsonSignature(BaseEstimator):
         self.initial_condition = initial_condition
         self.metric_choice = metric_choice
         self.p_param = p_param
-        
-        # Set device
-        if self.use_gpu is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = torch.device('cuda' if self.use_gpu and torch.cuda.is_available() else 'cpu')
-        
-        # Initialize attributes
-        self.X_train_ = None
-        self.y_train_ = None
-        self.classes_ = None
-        self.label_encoder_ = None
-        self.best_bandwidth_ = None
-        self.best_signature_level_ = None
-        self.best_robust_C_ = None
-        self.best_robust_a_ = None
-        
-        # Validate parameters
-        self._validate_parameters()
-    
+        self.verbose = verbose
+
+    def _resolve_device(self) -> torch.device:
+        """CUDA if it is available and use_gpu is not False, CPU otherwise."""
+        use_cuda = torch.cuda.is_available() and self.use_gpu is not False
+        return torch.device('cuda' if use_cuda else 'cpu')
+
+    _METRICS = ('signature_metric', 'supremum_metric', 'l1', 'l2', 'lp', 'var1', 'pvar')
+
     def _validate_parameters(self):
-        """Validate input parameters."""
+        """Validate the parameters (called by fit)."""
         if self.task_type not in ['regression', 'classification']:
             raise ValueError("task_type must be 'regression' or 'classification'")
         
         if self.input_type not in ['paths', 'signatures']:
             raise ValueError("input_type must be 'paths' or 'signatures'")
+
+        if self.metric_choice not in self._METRICS:
+            raise ValueError(f"metric_choice must be one of {self._METRICS}, got {self.metric_choice!r}")
+        if self.input_type == 'signatures' and self.metric_choice != 'signature_metric':
+            raise ValueError("input_type='signatures' requires metric_choice='signature_metric'")
+        if self.metric_choice in ('pvar', 'lp') and not (self.p_param is not None and self.p_param >= 1):
+            raise ValueError(f"p_param must be >= 1 for metric_choice={self.metric_choice!r}, got {self.p_param}")
         
         if self.signature_level < 1:
             raise ValueError("signature_level must be >= 1")
         
         if self.cv_folds < 2:
             raise ValueError("cv_folds must be >= 2")
-
 
         if self.bandwidth is not None and not self.bandwidth > 0:
             raise ValueError(f"bandwidth must be > 0, got {self.bandwidth}")
@@ -492,18 +491,20 @@ class NadarayaWatsonSignature(BaseEstimator):
         weights = self._kernel_weights(distances, bandwidth)
 
         n_classes = len(self.classes_)
-        pred_probs = torch.zeros((X_test.shape[0], n_classes), device=self.device)
+        pred_probs = torch.zeros((X_test.shape[0], n_classes), device=self.device_)
 
-        for idx, class_label in enumerate(self.classes_):
-            indicator = (y_train == class_label).float()
+        # y_train holds the encoded labels 0, ..., n_classes - 1
+        for idx in range(n_classes):
+            indicator = (y_train == idx).float()
             pred_probs[:, idx] = torch.sum(weights * indicator.unsqueeze(0), dim=1)
 
         pred_classes = torch.argmax(pred_probs, dim=1)
         return pred_classes, pred_probs
     
     def _log(self, message: str) -> None:
-        """Progress output."""
-        print(message)
+        """Progress output, shown if verbose=True."""
+        if self.verbose:
+            print(message)
 
     @staticmethod
     def _describe(bandwidth, level, robust_C, robust_a) -> str:
@@ -563,10 +564,10 @@ class NadarayaWatsonSignature(BaseEstimator):
         path metrics: the paths themselves.
         """
         if self.metric_choice != "signature_metric":
-            return torch.tensor(X, dtype=torch.float32, device=self.device)
+            return torch.tensor(X, dtype=torch.float32, device=self.device_)
         if signatures is None:
             signatures = self._compute_signatures(X, level) if self.input_type == 'paths' else X
-        features = torch.tensor(signatures, dtype=torch.float32, device=self.device)
+        features = torch.tensor(signatures, dtype=torch.float32, device=self.device_)
         if self.robust:
             features = self._robustsignature(features, sig_level=level, C=robust_C, a_param=robust_a)
         return features
@@ -588,7 +589,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         Mean validation MSE (regression) or accuracy (classification) over the
         folds, or NaN if a fold produces non-finite predictions.
         """
-        y_t = torch.tensor(y, dtype=torch.float32, device=self.device)
+        y_t = torch.tensor(y, dtype=torch.float32, device=self.device_)
         scores = []
         for train, val in folds:
             tr, va = torch.as_tensor(train), torch.as_tensor(val)
@@ -612,7 +613,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         is better); ties go to the combination that comes first in grid order.
         """
         folds = self._cv_folds(y)
-        X0_t = torch.tensor(X0, dtype=torch.float32, device=self.device)
+        X0_t = torch.tensor(X0, dtype=torch.float32, device=self.device_)
         higher_is_better = self.task_type == 'classification'
         score_name = "accuracy" if higher_is_better else "MSE"
         self._log(f"Cross-validation over {len(levels) * len(bandwidths) * len(robust_params)} "
@@ -690,8 +691,8 @@ class NadarayaWatsonSignature(BaseEstimator):
         self : object
             Returns self.
         """
-        # Parameters may have been changed via set_params since __init__
         self._validate_parameters()
+        self.device_ = self._resolve_device()
         if self.signature_mode is not None:
             warnings.warn(
                 "signature_mode is deprecated and has no effect: every iisignature output "
@@ -716,7 +717,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         if self.task_type == 'classification':
             self.label_encoder_ = LabelEncoder()
             y_fit = self.label_encoder_.fit_transform(y)
-            self.classes_ = torch.tensor(np.unique(y_fit), device=self.device)
+            self.classes_ = self.label_encoder_.classes_
             counts = np.bincount(y_fit)
             self._log(f"Classes: {len(counts)}, samples per class: min={counts.min()}, max={counts.max()}")
         else:
@@ -736,8 +737,8 @@ class NadarayaWatsonSignature(BaseEstimator):
         if self.metric_choice == "signature_metric" and not torch.any(self.X_train_ != 0):
             raise ValueError("All computed signatures are zero. Check the path data format: "
                              "(n_samples, n_timesteps, n_features).")
-        self.X0_train_ = torch.tensor(X0, dtype=torch.float32, device=self.device)
-        self.y_train_ = torch.tensor(y_fit, dtype=torch.float32, device=self.device)
+        self.X0_train_ = torch.tensor(X0, dtype=torch.float32, device=self.device_)
+        self.y_train_ = torch.tensor(y_fit, dtype=torch.float32, device=self.device_)
         self._log(f"Selected {self._describe(*best)}; training data shape {tuple(self.X_train_.shape)}")
         return self
 
@@ -747,7 +748,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         X0 must already be resolved by _resolve_X0.
         """
         X_test = self._features(X, self.best_signature_level_, self.best_robust_C_, self.best_robust_a_)
-        X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device)
+        X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device_)
         return X_test, X0_test
 
     def predict(self, X: np.ndarray, X0: Optional[np.ndarray] = None) -> np.ndarray:
@@ -767,8 +768,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         predictions : array-like of shape (n_samples,)
             Predicted values or class labels.
         """
-        if self.X_train_ is None:
-            raise ValueError("Model must be fitted before making predictions")
+        check_is_fitted(self, "X_train_")
 
         X = np.array(X)
         X0 = self._resolve_X0(X0, X.shape[0])
@@ -796,15 +796,14 @@ class NadarayaWatsonSignature(BaseEstimator):
         Returns
         -------
         probabilities : array-like of shape (n_samples, n_classes)
-            Predicted class probabilities. Columns follow the sorted class labels,
-            self.label_encoder_.classes_; predict returns the label of the
-            largest column.
+            Predicted class probabilities. Columns follow self.classes_ (the
+            sorted class labels); predict returns the label of the largest
+            column.
         """
         if self.task_type != 'classification':
             raise ValueError("predict_proba is only available for classification tasks")
 
-        if self.X_train_ is None:
-            raise ValueError("Model must be fitted before making predictions")
+        check_is_fitted(self, "X_train_")
 
         X = np.array(X)
         X0 = self._resolve_X0(X0, X.shape[0])
@@ -819,14 +818,9 @@ class NadarayaWatsonSignature(BaseEstimator):
                  if p != 'self']
         return {name: getattr(self, name) for name in names}
     
-    def set_params(self, **params):
-        """Set parameters for this estimator."""
-        for key, value in params.items():
-            setattr(self, key, value)
-        return self
 
 
-class NWSignatureRegressor(NadarayaWatsonSignature, RegressorMixin):
+class NWSignatureRegressor(RegressorMixin, NadarayaWatsonSignature):
     """Nadaraya-Watson Signature Regressor."""
     
     def __init__(self, **kwargs):
@@ -838,7 +832,7 @@ class NWSignatureRegressor(NadarayaWatsonSignature, RegressorMixin):
         return r2_score(y, self.predict(X, X0), sample_weight=sample_weight)
 
 
-class NWSignatureClassifier(NadarayaWatsonSignature, ClassifierMixin):
+class NWSignatureClassifier(ClassifierMixin, NadarayaWatsonSignature):
     """Nadaraya-Watson Signature Classifier."""
     
     def __init__(self, **kwargs):
