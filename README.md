@@ -107,13 +107,26 @@ for regression, cross-entropy for classification), with Gaussian weights
 
 - `distance="levels"`: one weight per signature level,
   `d^2 = sum_k exp(eta_k) |z^(k)(x) - z^(k)(x')|^2`, initialised at 1.
+- `distance="projection"`: a linear projection `B` with `projection_dim` rows,
+  `d^2 = |B (z(x) - z(x'))|^2`, initialised with the top principal directions
+  of the training features.
 
 ```python
 from nwsig import NWLearnedDistanceClassifier
 
 model = NWLearnedDistanceClassifier(signature_level=3, distance="levels").fit(X_train, y_train)
 print(model.level_weights_, model.loo_loss_init_, model.loo_loss_)
+
+model = NWLearnedDistanceClassifier(signature_level=3, distance="projection", projection_dim=5).fit(X_train, y_train)
+print(model.projection_.shape)
 ```
+
+The projection has `projection_dim * n_features` parameters and can drive its
+leave-one-out loss to almost zero for any labels, including random ones (with
+the random labels of the example above it goes from about 0.70 to 0.017 or less
+in five random draws), so it overfits. With at least as many signature features as training samples it can
+place the training samples at arbitrary points. The level weights, with one
+parameter per level, barely move on random labels.
 
 Note that `bandwidth` is the length scale `h` of `exp(-d^2 / (2 h^2))` here,
 not the `h` of `exp(-d^2 / h)` used by `NWSignatureRegressor`. With

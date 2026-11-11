@@ -10,9 +10,11 @@ robust=True, and the Gaussian Nadaraya-Watson weights
 
 with a distance d learned from the training data:
 
-    distance='levels':  d_eta(x, x')^2 = sum_k exp(eta_k) |z^(k)(x) - z^(k)(x')|^2,
+    distance='levels':      d_eta(x, x')^2 = sum_k exp(eta_k) |z^(k)(x) - z^(k)(x')|^2,
+    distance='projection':  d_B(x, x')^2 = |B (z(x) - z(x'))|^2,
 
-one weight exp(eta_k) per signature level k = 1, ..., signature_level.
+with one weight exp(eta_k) per signature level k = 1, ..., signature_level, or
+a projection B with projection_dim rows.
 
 The distance parameters minimise the leave-one-out (LOO) loss: every training
 sample is predicted from the others (its own weight is masked), with squared
@@ -41,25 +43,52 @@ class NWLearnedDistance(NadarayaWatsonSignature):
        (signature level, robust C and a) and bandwidth h; the best one is kept.
        Hyperparameters that are fixed are used as given, the others are taken
        from their grids as in NadarayaWatsonSignature.
-    2. Learned distance. Starting from eta = 0 (level weights 1), eta minimises
-       the LOO loss with h fixed, by full-batch Adam in float64. A common shift
-       of all eta_k is the same as a change of bandwidth, so h is not learned
-       separately: the learned weights also contain the overall scale of the
-       distance. Adam moves each eta_k by about learning_rate per step, so it
-       cannot jump into the flat region of very large weights, where every
-       sample's weight is on its nearest neighbour. The parameters with the
-       lowest LOO loss are kept, so the result is never worse than the initial
-       model; the iteration stops early once the loss has not decreased for
-       25 steps.
+    2. Learned distance, minimising the LOO loss with h fixed by full-batch
+       Adam in float64. Rescaling the distance is the same as changing the
+       bandwidth, so h is not learned separately: the learned parameters also
+       contain the overall scale of the distance.
+
+       - 'levels': starts from eta = 0 (level weights 1, the initial model).
+       - 'projection': starts from the top projection_dim principal directions
+         of the training features (orthonormal rows; B = 0 would be a
+         stationary point), for which h is selected again by LOO. B is
+         parametrised as exp(s) W / sqrt(n_features): W starts with entries of
+         root mean square 1, the log-scale s at 0. Without s, Adam needs
+         thousands of steps when B has to grow by orders of magnitude, e.g.
+         after the directions that dominated the initial distance (and so the
+         choice of h) are suppressed.
+
+       In these units Adam changes eta and s by about learning_rate per step
+       and W by about learning_rate relative to its entries, so it cannot jump
+       into the flat region of very large distances, where every sample's
+       weight is on its nearest neighbour. The parameters with the lowest LOO
+       loss are kept, so the result is never worse than the initial distance;
+       the iteration stops early once the loss has not decreased for 25 steps.
+
+    Overfitting of the projection: B has projection_dim * n_features
+    parameters, and the LOO loss can be driven to (almost) zero for any
+    labels, including random ones. This always happens when the training
+    features are linearly independent (typically n_features >= n_samples,
+    which is common for signatures): B can then map the training samples to
+    arbitrary points. It also happens with fewer features than samples: for
+    100 random paths with random binary labels (39 features, projection_dim=5)
+    the LOO cross-entropy goes from 0.68 to 2.5e-6. The LOO loss then no
+    longer measures generalisation. The level weights (one parameter per
+    level) go from 0.70 to 0.68 on the same data.
 
     The features of the training samples and their squared distances per level
-    are computed once and cached during fitting. With max_iter=0 the estimator
-    is the unweighted Nadaraya-Watson estimator with h chosen by LOO.
+    are computed once and cached during fitting. With max_iter=0 and
+    distance='levels' the estimator is the unweighted Nadaraya-Watson estimator
+    with h chosen by LOO.
 
     Parameters
     ----------
     distance : str, optional (default='levels')
-        Learned distance: 'levels' (one weight per signature level).
+        Learned distance: 'levels' (one weight per signature level) or
+        'projection' (linear projection B of the features).
+    projection_dim : int, optional (default=10)
+        Number of rows of B (distance='projection'); at most the number of
+        features and of training samples.
     max_iter : int, optional (default=300)
         Maximum number of Adam steps (0: no learning).
     learning_rate : float, optional (default=0.1)
@@ -91,26 +120,31 @@ class NWLearnedDistance(NadarayaWatsonSignature):
     level_sizes_ : list of int
         Number of features in each signature level.
     level_weights_ : ndarray of shape (signature level,)
-        Learned weights exp(eta_k).
+        Learned weights exp(eta_k) (distance='levels').
+    projection_ : ndarray of shape (projection_dim, n_features)
+        Learned projection B (distance='projection').
     loo_loss_init_, loo_loss_ : float
-        LOO loss of the initial model (weights 1) and of the learned distance.
+        LOO loss of the initial distance (level weights 1, or the principal
+        directions) and of the learned distance.
     n_iter_ : int
         Number of Adam steps performed.
     X_train_ : torch.Tensor
-        Training features scaled so that their Euclidean distance is the
-        learned distance.
+        Training features mapped (scaled per level, or projected by B) so that
+        their Euclidean distance is the learned distance.
     """
 
-    _DISTANCES = ('levels',)
+    _DISTANCES = ('levels', 'projection')
     # Default bandwidths, relative to the median distance between training samples
     _RELATIVE_BANDWIDTH_GRID = tuple(np.geomspace(1e-3, 3.0, 31))
     # Adam stops when the LOO loss has not decreased by a relative _TOL for _PATIENCE steps
     _PATIENCE = 25
     _TOL = 1e-6
 
-    def __init__(self, distance='levels', max_iter=300, learning_rate=0.1, loo_max_samples=2000, **kwargs):
+    def __init__(self, distance='levels', projection_dim=10, max_iter=300, learning_rate=0.1,
+                 loo_max_samples=2000, **kwargs):
         super().__init__(**kwargs)
         self.distance = distance
+        self.projection_dim = projection_dim
         self.max_iter = max_iter
         self.learning_rate = learning_rate
         self.loo_max_samples = loo_max_samples
@@ -131,6 +165,8 @@ class NWLearnedDistance(NadarayaWatsonSignature):
                              "metric_choice must be 'signature_metric'")
         if self.initial_condition:
             raise ValueError("initial_condition=True is not supported with a learned distance")
+        if int(self.projection_dim) != self.projection_dim or self.projection_dim < 1:
+            raise ValueError(f"projection_dim must be an integer >= 1, got {self.projection_dim}")
         if int(self.max_iter) != self.max_iter or self.max_iter < 0:
             raise ValueError(f"max_iter must be an integer >= 0, got {self.max_iter}")
         if not self.learning_rate > 0:
@@ -160,8 +196,10 @@ class NWLearnedDistance(NadarayaWatsonSignature):
         return [int(s) for s in np.diff(lengths)]
 
     def _transform(self, Z: torch.Tensor) -> torch.Tensor:
-        """Scale the features so that their Euclidean distance is the learned distance."""
-        return Z * self._feature_scale_
+        """Map the features so that their Euclidean distance is the learned distance."""
+        if self.distance == 'projection':
+            return Z @ self._feature_map_
+        return Z * self._feature_map_
 
     def _prepare_test_data(self, X, X0):
         X_test, X0_test = super()._prepare_test_data(X, X0)
@@ -175,6 +213,13 @@ class NWLearnedDistance(NadarayaWatsonSignature):
             return np.arange(n)
         rng = np.random.default_rng(self.random_state)
         return np.sort(rng.choice(n, size=self.loo_max_samples, replace=False))
+
+    @staticmethod
+    def _sq_distances(P: torch.Tensor, rows: np.ndarray) -> torch.Tensor:
+        """(len(rows), n) squared distances |P[rows[r]] - P[j]|^2 (differentiable, also at 0)."""
+        P_rows = P[rows]
+        sq = (P_rows ** 2).sum(dim=1)[:, None] + (P ** 2).sum(dim=1)[None, :] - 2 * P_rows @ P.T
+        return sq.clamp_min(0)
 
     def _level_sq_distances(self, Z: torch.Tensor, rows: np.ndarray, sizes) -> torch.Tensor:
         """(levels, len(rows), n) squared distances |z^(k)(x_r) - z^(k)(x_j)|^2, float64."""
@@ -272,46 +317,75 @@ class NWLearnedDistance(NadarayaWatsonSignature):
             raise ValueError("Every candidate produced a non-finite LOO loss.")
         return best
 
-    def _minimise(self, param: torch.Tensor, objective):
+    def _minimise(self, params, objective):
         """
-        Minimise objective() over param (a leaf tensor with requires_grad) by
-        full-batch Adam, starting from its current value.
+        Minimise objective() over params (leaf tensors with requires_grad) by
+        full-batch Adam, starting from their current values.
 
-        Returns (initial loss, lowest loss, parameter with the lowest loss,
+        Returns (initial loss, lowest loss, parameters with the lowest loss,
         number of steps).
         """
+        snapshot = lambda: [p.detach().clone() for p in params]
         with torch.no_grad():
             initial = float(objective())
-        best_value, best_param = initial, param.detach().clone()
-        optimizer = torch.optim.Adam([param], lr=self.learning_rate)
+        best_value, best_params = initial, snapshot()
+        optimizer = torch.optim.Adam(params, lr=self.learning_rate)
         steps = since_improvement = 0
         while steps < self.max_iter and since_improvement < self._PATIENCE:
             optimizer.zero_grad()
             value = objective()
             if not torch.isfinite(value):
                 break
-            # value is the loss at the current parameter, before this step
+            # value is the loss at the current parameters, before this step
             if float(value) < best_value - self._TOL * abs(best_value):
-                best_value, best_param, since_improvement = float(value), param.detach().clone(), 0
+                best_value, best_params, since_improvement = float(value), snapshot(), 0
             else:
                 since_improvement += 1
             value.backward()
-            if not torch.isfinite(param.grad).all():
+            if not all(torch.isfinite(p.grad).all() for p in params):
                 break
             optimizer.step()
             steps += 1
         with torch.no_grad():
             final = float(objective())
         if np.isfinite(final) and final < best_value:
-            best_value, best_param = final, param.detach().clone()
-        return initial, best_value, best_param, steps
+            best_value, best_params = final, snapshot()
+        return initial, best_value, best_params, steps
 
     def _learn_level_weights(self, D: torch.Tensor, h: float, loo_loss):
         """eta minimising the LOO loss of sum_k exp(eta_k) D_k, from eta = 0."""
         eta = torch.zeros(D.shape[0], dtype=torch.float64, device=D.device, requires_grad=True)
-        initial, final, eta, steps = self._minimise(
-            eta, lambda: loo_loss(torch.einsum('k,kqn->qn', eta.exp(), D), h))
+        initial, final, (eta,), steps = self._minimise(
+            [eta], lambda: loo_loss(torch.einsum('k,kqn->qn', eta.exp(), D), h))
         return eta, initial, final, steps
+
+    def _learn_projection(self, Z: torch.Tensor, rows: np.ndarray, loo_loss):
+        """
+        B minimising the LOO loss of |B (z - z')|^2, from the top principal
+        directions of the training features, with h selected by LOO for them.
+        Returns (B, h, initial loss, final loss, steps).
+        """
+        Z = Z.to(torch.float64)
+        _, _, Vh = torch.linalg.svd(Z - Z.mean(dim=0), full_matrices=False)
+        B0 = Vh[:min(self.projection_dim, Vh.shape[0])]
+        unit = 1.0 / np.sqrt(Z.shape[1])   # root mean square of the entries of B0
+
+        d2 = self._sq_distances(Z @ B0.T, rows)
+        bandwidths = self._bandwidth_candidates(d2, rows)
+        with torch.no_grad():
+            losses = [float(loo_loss(d2, h)) for h in bandwidths]
+        if not np.isfinite(losses).any():
+            raise ValueError("Every bandwidth produced a non-finite LOO loss for the initial projection.")
+        h = bandwidths[int(np.nanargmin(losses))]
+        self._log(f"  initial projection: {len(B0)} principal directions, bandwidth={h}, "
+                  f"LOO loss={np.nanmin(losses):.6f}")
+
+        W = (B0 / unit).clone().requires_grad_(True)
+        log_scale = torch.zeros((), dtype=Z.dtype, device=Z.device, requires_grad=True)
+        projection = lambda W, log_scale: unit * log_scale.exp() * W
+        initial, final, (W, log_scale), steps = self._minimise(
+            [W, log_scale], lambda: loo_loss(self._sq_distances(Z @ projection(W, log_scale).T, rows), h))
+        return projection(W, log_scale), h, initial, final, steps
 
     # ------------------------------------------------------------------ fit
 
@@ -353,20 +427,27 @@ class NWLearnedDistance(NadarayaWatsonSignature):
                   f"LOO loss over {len(rows)} of them")
 
         _, h, level, robust_C, robust_a, Z, sizes, D = self._initial_model(X, rows, loo_loss)
-        eta, self.loo_loss_init_, self.loo_loss_, self.n_iter_ = self._learn_level_weights(D, h, loo_loss)
+        if self.distance == 'levels':
+            eta, self.loo_loss_init_, self.loo_loss_, self.n_iter_ = self._learn_level_weights(D, h, loo_loss)
+            self.level_weights_ = eta.exp().cpu().numpy()
+            self._feature_map_ = torch.repeat_interleave(
+                torch.as_tensor(np.sqrt(self.level_weights_), dtype=Z.dtype, device=Z.device),
+                torch.as_tensor(sizes, device=Z.device))
+            learned = f"level weights {np.array2string(self.level_weights_, precision=4)}"
+        else:
+            del D
+            B, h, self.loo_loss_init_, self.loo_loss_, self.n_iter_ = self._learn_projection(Z, rows, loo_loss)
+            self.projection_ = B.cpu().numpy()
+            self._feature_map_ = B.T.to(Z.dtype).contiguous()
+            learned = f"projection of shape {self.projection_.shape}"
 
         self.best_bandwidth_, self.best_signature_level_ = h, level
         self.best_robust_C_, self.best_robust_a_ = robust_C, robust_a
         self.level_sizes_ = list(sizes)
-        self.level_weights_ = eta.exp().cpu().numpy()
-        self._feature_scale_ = torch.repeat_interleave(
-            torch.as_tensor(np.sqrt(self.level_weights_), dtype=Z.dtype, device=Z.device),
-            torch.as_tensor(sizes, device=Z.device))
         self.X_train_ = self._transform(Z)
         self.X0_train_ = torch.zeros((len(y_fit), 1), dtype=torch.float32, device=self.device_)
         self.y_train_ = torch.tensor(y_fit, dtype=torch.float32, device=self.device_)
-        self._log(f"Selected {self._describe(h, level, robust_C, robust_a)}; level weights "
-                  f"{np.array2string(self.level_weights_, precision=4)}; LOO loss "
+        self._log(f"Selected {self._describe(h, level, robust_C, robust_a)}; {learned}; LOO loss "
                   f"{self.loo_loss_init_:.6f} -> {self.loo_loss_:.6f} ({self.n_iter_} Adam steps)")
         return self
 

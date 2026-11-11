@@ -12,12 +12,15 @@ training data, truncation level K from suggest_truncation_level) and compares
               the learned variants)
     levels    NWLearnedDistanceClassifier(distance='levels'): one learned
               weight per signature level
+    proj_r    NWLearnedDistanceClassifier(distance='projection',
+              projection_dim=r) for r = 2, 5, 10, 20
 
 on the fixed train/test splits. Run from the repository root:
 
-    python examples/learned_distance_benchmark.py [--datasets Libras Epilepsy ...]
+    python examples/learned_distance_benchmark.py [--datasets Libras ...] [--models levels ...]
 
-Results are printed and written to examples/results/learned_distance.csv.
+Results are printed and merged into examples/results/learned_distance.csv
+(rows of the same dataset and model are replaced).
 """
 import argparse
 import os
@@ -46,6 +49,9 @@ MODELS = {
                                                 signature_level=K),
     "nw_loo": lambda K: NWLearnedDistanceClassifier(signature_level=K, max_iter=0),
     "levels": lambda K: NWLearnedDistanceClassifier(signature_level=K, distance="levels"),
+    **{f"proj_r{r}": (lambda K, r=r: NWLearnedDistanceClassifier(signature_level=K, distance="projection",
+                                                                 projection_dim=r))
+       for r in (2, 5, 10, 20)},
 }
 
 
@@ -84,12 +90,14 @@ def evaluate(name, models):
                    log_loss=log_loss(y_te, proba, labels=model.classes_),
                    fit_seconds=time.time() - start)
         if isinstance(model, NWLearnedDistanceClassifier):
-            row.update(loo_init=model.loo_loss_init_, loo_final=model.loo_loss_, n_iter=model.n_iter_,
-                       weights=" ".join(f"{w:.3g}" for w in model.level_weights_))
+            row.update(loo_init=model.loo_loss_init_, loo_final=model.loo_loss_, n_iter=model.n_iter_)
+            if model.distance == "levels":
+                row.update(weights=" ".join(f"{w:.3g}" for w in model.level_weights_))
         rows.append(row)
         print(f"{name:26s} {label:9s} acc={row['accuracy']:.4f} log_loss={row['log_loss']:.4f} "
-              f"({row['fit_seconds']:.1f}s)" + (f"  weights {row['weights']}" if "weights" in row else ""),
-              flush=True)
+              f"({row['fit_seconds']:.1f}s)" + (f"  LOO {row['loo_init']:.4f} -> {row['loo_final']:.4f}"
+                                                 if "loo_init" in row else "")
+              + (f"  weights {row['weights']}" if "weights" in row else ""), flush=True)
     return rows
 
 
@@ -114,9 +122,14 @@ def main():
     args = parser.parse_args()
 
     results = pd.DataFrame([row for name in args.datasets for row in evaluate(name, args.models)])
+    if os.path.exists(args.out):
+        previous = pd.read_csv(args.out)
+        keep = ~previous.set_index(["dataset", "model"]).index.isin(results.set_index(["dataset", "model"]).index)
+        results = pd.concat([previous[keep], results], ignore_index=True)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     results.to_csv(args.out, index=False)
-    summary(results, args.models)
+    models = [m for m in MODELS if m in set(results.model)]
+    summary(results[results.dataset.isin(args.datasets)], models)
     print(f"\nResults written to {args.out}")
 
 

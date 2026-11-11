@@ -107,6 +107,45 @@ def test_log_signature_levels(make_paths):
                                rtol=1e-5, atol=1e-6)
 
 
+def principal_directions(S, r):
+    """Top r principal directions of S (rows), computed with numpy."""
+    return np.linalg.svd(S - S.mean(axis=0), full_matrices=False)[2][:r]
+
+
+@pytest.mark.parametrize("task", ["regression", "classification"])
+def test_projection_loo_loss_matches_refitting(regression_data, noisy_classification_data, task):
+    X, y = regression_data if task == "regression" else noisy_classification_data
+    X, y = X[:40], y[:40]
+    Model = NWLearnedDistanceRegressor if task == "regression" else NWLearnedDistanceClassifier
+    model = Model(signature_level=3, distance="projection", projection_dim=3).fit(X, y)
+    h, S = model.best_bandwidth_, ii.sig(X, 3)
+    assert model.projection_.shape == (3, S.shape[1])
+    assert model.loo_loss_ < model.loo_loss_init_
+    # the initial distance is the projection on the top principal directions (signs do not matter)
+    init = brute_force_loo(S @ principal_directions(S, 3).T, y, h, task)
+    assert init == pytest.approx(model.loo_loss_init_, rel=1e-4)
+    assert brute_force_loo(S @ model.projection_.T, y, h, task) == pytest.approx(model.loo_loss_, rel=1e-4)
+    np.testing.assert_allclose(model.X_train_.numpy(), S @ model.projection_.T, rtol=1e-4, atol=1e-5)
+
+
+def test_full_rank_projection_starts_from_the_unweighted_metric(regression_data):
+    """With as many directions as features the initial projection is a rotation."""
+    X, y = regression_data
+    kwargs = dict(signature_level=2, max_iter=0)
+    plain = NWLearnedDistanceRegressor(**kwargs).fit(X, y)
+    rotated = NWLearnedDistanceRegressor(distance="projection", projection_dim=6, **kwargs).fit(X, y)
+    assert rotated.projection_.shape == (6, 6)
+    np.testing.assert_allclose(rotated.projection_ @ rotated.projection_.T, np.eye(6), atol=1e-10)
+    assert rotated.loo_loss_init_ == pytest.approx(plain.loo_loss_init_, rel=1e-10)
+    np.testing.assert_allclose(rotated.predict(X), plain.predict(X), rtol=1e-4)
+
+
+def test_projection_dim_is_capped(make_paths):
+    X = make_paths(5)
+    model = NWLearnedDistanceRegressor(signature_level=2, distance="projection", projection_dim=50).fit(X, X[:, -1, 1])
+    assert model.projection_.shape == (5, 6)
+
+
 # --------------------------------------------------------------------------- learning
 
 def synthetic_levels(n, task, seed=0):
@@ -138,10 +177,34 @@ def test_learns_the_informative_level(task):
     assert learned.score(S[200:], y[200:]) > plain.score(S[200:], y[200:]) + 0.2
 
 
-def test_learning_does_not_increase_loo_loss(regression_data, classification_data):
+@pytest.mark.parametrize("task", ["regression", "classification"])
+def test_projection_finds_the_informative_direction(task):
+    """
+    Six features: two of large noise (which the initial principal directions
+    pick), the target depends on z_2 - z_4 only.
+    """
+    rng = np.random.default_rng(0)
+    S = rng.normal(size=(300, 6)) * np.array([10, 10, 1, 1, 1, 1])
+    target = S[:, 2] - S[:, 4]
+    y = target if task == "regression" else (target > 0).astype(int)
+    Model = NWLearnedDistanceRegressor if task == "regression" else NWLearnedDistanceClassifier
+    kwargs = dict(input_type="signatures", signature_level=2, distance="projection", projection_dim=2)
+    plain = Model(max_iter=0, **kwargs).fit(S[:200], y[:200])
+    learned = Model(**kwargs).fit(S[:200], y[:200])
+    u = np.array([0, 0, 1, 0, -1, 0]) / np.sqrt(2)
+    B = learned.projection_
+    # u lies (almost) in the row space of B
+    in_row_space = np.linalg.norm(np.linalg.pinv(B) @ (B @ u))
+    assert in_row_space > 0.95
+    assert learned.loo_loss_ < 0.05 * plain.loo_loss_
+    assert learned.score(S[200:], y[200:]) > plain.score(S[200:], y[200:]) + 0.5
+
+
+@pytest.mark.parametrize("distance", ["levels", "projection"])
+def test_learning_does_not_increase_loo_loss(regression_data, classification_data, distance):
     for Model, (X, y) in [(NWLearnedDistanceRegressor, regression_data),
                           (NWLearnedDistanceClassifier, classification_data)]:
-        model = Model(signature_level=3).fit(X, y)
+        model = Model(signature_level=3, distance=distance, projection_dim=4).fit(X, y)
         assert model.loo_loss_ <= model.loo_loss_init_
         assert model.n_iter_ >= 1
 
@@ -167,10 +230,11 @@ def test_loo_subsample(regression_data):
     np.testing.assert_array_equal(model.predict(X[60:]), fit().predict(X[60:]))
 
 
-def test_class_with_single_sample(make_paths):
+@pytest.mark.parametrize("distance", ["levels", "projection"])
+def test_class_with_single_sample(make_paths, distance):
     X = make_paths(30)
     y = np.array([0] * 15 + [1] * 14 + [2])
-    model = NWLearnedDistanceClassifier(signature_level=2).fit(X, y)
+    model = NWLearnedDistanceClassifier(signature_level=2, distance=distance, projection_dim=3).fit(X, y)
     assert np.isfinite(model.loo_loss_)
     proba = model.predict_proba(X)
     np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
@@ -182,11 +246,12 @@ def test_class_with_single_sample(make_paths):
 def test_get_params_and_clone(regression_data):
     own = set(inspect.signature(NWLearnedDistance.__init__).parameters) - {"self", "kwargs"}
     base = set(inspect.signature(NadarayaWatsonSignature.__init__).parameters) - {"self"}
-    model = NWLearnedDistanceRegressor(max_iter=7, learning_rate=0.3, loo_max_samples=50, signature_level=3)
+    model = NWLearnedDistanceRegressor(distance="projection", projection_dim=3, max_iter=7, learning_rate=0.3,
+                                       loo_max_samples=50, signature_level=3)
     assert set(model.get_params()) == own | base
     copy = clone(model)
-    assert (copy.max_iter, copy.learning_rate, copy.loo_max_samples, copy.signature_level, copy.task_type) == \
-        (7, 0.3, 50, 3, "regression")
+    assert (copy.distance, copy.projection_dim, copy.max_iter, copy.learning_rate, copy.loo_max_samples,
+            copy.signature_level, copy.task_type) == ("projection", 3, 7, 0.3, 50, 3, "regression")
     X, y = regression_data
     before = model.get_params()
     model.fit(X, y)
@@ -204,6 +269,7 @@ def test_sklearn_tools(classification_data):
 
 @pytest.mark.parametrize("kwargs", [
     dict(distance="mahalanobis"),
+    dict(distance="projection", projection_dim=0),
     dict(metric_choice="l2"),
     dict(initial_condition=True),
     dict(max_iter=-1),
