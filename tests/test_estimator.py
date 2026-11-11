@@ -151,6 +151,15 @@ def test_signature_level_grid_is_searched(regression_data):
     assert model.X_train_.shape[1] == ii.siglength(2, model.best_signature_level_)
 
 
+def test_classes_smaller_than_cv_folds(make_paths):
+    """Every class smaller than cv_folds (e.g. StandWalkJump: 3 classes x 4 samples, 5 folds)."""
+    X = make_paths(12)
+    y = np.repeat(["jumping", "standing", "walking"], 4)
+    with pytest.warns(UserWarning, match="cannot be stratified"):
+        model = NWSignatureClassifier(bandwidth_grid=[1.0, 0.1], cv_folds=5).fit(X, y)
+    assert set(model.predict(X)) <= set(y)
+
+
 def test_cv_is_reproducible(regression_data):
     X, y = regression_data
     fit = lambda: NWSignatureRegressor(bandwidth_grid=np.geomspace(1e-3, 1, 10), random_state=3).fit(X, y)

@@ -597,9 +597,20 @@ class NadarayaWatsonSignature(BaseEstimator):
     def _cv_folds(self, y: np.ndarray) -> List[Tuple[np.ndarray, np.ndarray]]:
         """
         (train, validation) index pairs of the K folds: shuffled with
-        random_state, and stratified by class for classification.
+        random_state, and stratified by class for classification. If every
+        class has fewer than K samples, stratification is impossible and plain
+        shuffled folds are used instead.
         """
-        if self.task_type == 'classification':
+        stratify = self.task_type == 'classification'
+        if stratify and np.bincount(y).max() < self.cv_folds:
+            warnings.warn(
+                f"Every class has fewer than cv_folds={self.cv_folds} samples, so the "
+                "cross-validation folds cannot be stratified by class; using "
+                "non-stratified folds.",
+                UserWarning, stacklevel=4,
+            )
+            stratify = False
+        if stratify:
             splitter = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
         else:
             splitter = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
