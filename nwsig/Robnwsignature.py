@@ -404,7 +404,22 @@ class NadarayaWatsonSignature(BaseEstimator):
 
 
     
-    def _nw_predict_regression(self, X_test: torch.Tensor,X0_test: torch.Tensor, X_train: torch.Tensor, X0_train: torch.Tensor, 
+    @staticmethod
+    def _kernel_weights(distances: torch.Tensor, bandwidth: float) -> torch.Tensor:
+        """
+        Row-normalised Gaussian kernel weights.
+
+        Returns w[i, j] = exp(-d_ij^2 / h) / sum_k exp(-d_ik^2 / h).
+
+        Computed as a softmax, which factors out the largest term of each row
+        before exponentiating. This is algebraically the same expression, but it
+        cannot underflow to 0/0 when every distance is large relative to the
+        bandwidth; in that limit the weights concentrate on the nearest training
+        point(s), which is the correct limit of the Nadaraya-Watson estimator.
+        """
+        return torch.softmax(-distances**2 / bandwidth, dim=1)
+
+    def _nw_predict_regression(self, X_test: torch.Tensor,X0_test: torch.Tensor, X_train: torch.Tensor, X0_train: torch.Tensor,
                               y_train: torch.Tensor, bandwidth: float) -> torch.Tensor:
         """
         Nadaraya-Watson regression prediction.
@@ -416,19 +431,11 @@ class NadarayaWatsonSignature(BaseEstimator):
         else:
             distances = self._pairwise_path_distance(X_test, X_train,X0_test,X0_train,kind = self.metric_choice)
 
-        # Compute kernel weights: exp(-distances^2 / h)
-        weights = torch.exp(-distances**2 / bandwidth)
-        
-        # Weighted prediction: sum(weights * y_train) / sum(weights)
-        # weights: (n_test, n_train), y_train: (n_train,)
-        # weights * y_train[None, :]: (n_test, n_train)
-        numerator = torch.sum(weights * y_train[None, :], dim=1)  # (n_test,)
-        denominator = torch.sum(weights, dim=1)  # (n_test,)
-        
-        # Avoid division by zero
-        denominator = torch.clamp(denominator, min=1e-12)
-        
-        return numerator / denominator
+        # Normalised kernel weights, shape (n_test, n_train); each row sums to 1
+        weights = self._kernel_weights(distances, bandwidth)
+
+        # Weighted prediction: sum_j w_ij * y_j
+        return weights @ y_train
     
     def _nw_predict_classification(self, X_test: torch.Tensor,X0_test: torch.Tensor, X_train: torch.Tensor, X0_train: torch.Tensor,
                                   y_train: torch.Tensor, bandwidth: float) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -438,20 +445,16 @@ class NadarayaWatsonSignature(BaseEstimator):
         else:
             distances = self._pairwise_path_distance(X_test, X_train,X0_test,X0_train,kind = self.metric_choice)
         
-        weights = torch.exp(-distances**2 / bandwidth)
-        
+        # Normalised kernel weights; each row sums to 1, so the class probabilities do too
+        weights = self._kernel_weights(distances, bandwidth)
+
         n_classes = len(self.classes_)
         pred_probs = torch.zeros((X_test.shape[0], n_classes), device=self.device)
-        
+
         for idx, class_label in enumerate(self.classes_):
             indicator = (y_train == class_label).float()
             pred_probs[:, idx] = torch.sum(weights * indicator.unsqueeze(0), dim=1)
-        
-        # Normalize probabilities
-        weight_sums = torch.sum(weights, dim=1, keepdim=True)
-        weight_sums = torch.clamp(weight_sums, min=1e-8)
-        pred_probs = pred_probs / weight_sums
-        
+
         pred_classes = torch.argmax(pred_probs, dim=1)
         return pred_classes, pred_probs
     
