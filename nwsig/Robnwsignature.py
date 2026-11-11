@@ -49,7 +49,9 @@ class NadarayaWatsonSignature(BaseEstimator):
     input_type : str, optional (default='paths')
         Type of input data: 'paths' for raw path data or 'signatures' for pre-computed signatures.
     cv_folds : int, optional (default=5)
-        Number of cross-validation folds for hyperparameter selection.
+        Number of cross-validation folds for hyperparameter selection. The folds
+        are shuffled (seeded by random_state) and, for classification,
+        stratified by class.
     signature_mode : int, optional (default=None)
         Deprecated and ignored: every iisignature output format gives the same
         signature. Will be removed in a future version.
@@ -74,7 +76,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         Grid of robust_a values for cross-validation (all > 0).
         If None, uses [0.5, 1.0, 1.5, 2.0].
     random_state : int, optional (default=42)
-        Random state for reproducibility.
+        Seed for shuffling the cross-validation folds.
     initial_condition : bool, optional (default=False)
         Whether to include the initial condition X0 in the distance. Signatures
         are invariant to translations of the path, so by default the starting
@@ -569,18 +571,16 @@ class NadarayaWatsonSignature(BaseEstimator):
             features = self._robustsignature(features, sig_level=level, C=robust_C, a_param=robust_a)
         return features
 
-    def _cv_folds(self, n_samples: int) -> List[Tuple[np.ndarray, np.ndarray]]:
-        """(train, validation) index pairs of the K folds, contiguous blocks."""
-        fold_size = n_samples // self.cv_folds
-        folds = []
-        for fold in range(self.cv_folds):
-            start = fold * fold_size
-            end = (fold + 1) * fold_size if fold < self.cv_folds - 1 else n_samples
-            val = np.arange(start, end)
-            train = np.concatenate([np.arange(0, start), np.arange(end, n_samples)])
-            if len(train) > 0 and len(val) > 0:
-                folds.append((train, val))
-        return folds
+    def _cv_folds(self, y: np.ndarray) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """
+        (train, validation) index pairs of the K folds: shuffled with
+        random_state, and stratified by class for classification.
+        """
+        if self.task_type == 'classification':
+            splitter = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
+        else:
+            splitter = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
+        return list(splitter.split(np.zeros((len(y), 1)), y))
 
     def _cv_score(self, features: torch.Tensor, X0: torch.Tensor, y: np.ndarray,
                   bandwidth: float, folds) -> float:
@@ -611,7 +611,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         MSE (regression, lower is better) or accuracy (classification, higher
         is better); ties go to the combination that comes first in grid order.
         """
-        folds = self._cv_folds(len(y))
+        folds = self._cv_folds(y)
         X0_t = torch.tensor(X0, dtype=torch.float32, device=self.device)
         higher_is_better = self.task_type == 'classification'
         score_name = "accuracy" if higher_is_better else "MSE"
