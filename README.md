@@ -141,6 +141,19 @@ cd examples
 jupyter notebook
 ```
 
+## Running the tests
+
+From the repository root:
+
+```bash
+pytest
+```
+
+The tests compare the implementation with independent references: the robust
+signature against its definition, p-variation against a brute-force
+computation, cross-validation against a fold-by-fold evaluation, and the
+fractional Brownian motion simulators against the theoretical covariance.
+
 ## Dependencies
 
 - numpy, scipy, scikit-learn

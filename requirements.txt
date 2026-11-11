@@ -14,4 +14,5 @@ aeon>=0.6.0
 # Optional dependencies
 matplotlib>=3.5.0  # For visualization in examples
 jupyter>=1.0.0     # For running notebooks
+pytest>=7.0        # For running the tests
 # sigkernel        # Only needed for nwsig.metrics.full_sig_metric (pip install sigkernel)
