@@ -128,6 +128,13 @@ class NadarayaWatsonSignature(BaseEstimator):
         
         if self.cv_folds < 2:
             raise ValueError("cv_folds must be >= 2")
+
+        if self.robust and self.log_signature:
+            raise ValueError(
+                "robust=True cannot be combined with log_signature=True: the robust "
+                "signature rescales signature level k by lambda**k, which is defined "
+                "for the signature, not the log-signature."
+            )
     
     def _psi_torch(self, x, C, a):
         """Vectorized psi function using PyTorch."""
@@ -137,41 +144,26 @@ class NadarayaWatsonSignature(BaseEstimator):
             C + C**(1+a) * (C**(-a) - x**(-2*a)) / a
         )
 
-    def _polynomial_torch(self, X):
-        """Efficient polynomial computation with PyTorch.
-        
-        Args:
-            X: Signature tensor of shape (M, deg)
-        
-        Returns:
-            a: Polynomial coefficients tensor of shape (M, 2*deg+1)
+    @staticmethod
+    def _signature_level_sizes(sig_dim: int, sig_level: int) -> List[int]:
         """
-        # Convert to PyTorch if not already
-        if not isinstance(X, torch.Tensor):
-            X = torch.tensor(X, dtype=torch.float32)
-        
-        M, deg = X.shape
-        a = torch.zeros((M, 2*deg+1), device=X.device)
-        
-        # Compute first coefficient (vectorized)
-        norms = 1+torch.norm(X, dim=1)
-        a[:, 0] = 1 - self._psi_torch(torch.sqrt(1 + norms**2), C=1.0, a=1.0)  # Adjust C and a as needed
-        
-        # Compute remaining coefficients (vectorized where possible)
-        sum_idx = 0
-        for l in range(deg):
-            coeff_size = 2**(l+1)
-            end_idx = min(sum_idx + coeff_size, X.shape[1])
-            
-            # Handle potential case where the slice might be out of bounds
-            if sum_idx < X.shape[1]:
-                slice_size = end_idx - sum_idx
-                X_slice = X[:, sum_idx:end_idx]
-                a[:, 2*(l+1)] = torch.norm(X_slice, dim=1)**2
-            
-            sum_idx = end_idx
-        
-        return a
+        Number of entries in each level 1..sig_level of a truncated signature.
+
+        Level k of the signature of a d-dimensional path has d**k entries, so a
+        signature truncated at sig_level has d + d**2 + ... + d**sig_level
+        entries. The path dimension d is recovered from that length; it is
+        unique because the length is strictly increasing in d.
+        """
+        d = 1
+        while sum(d**k for k in range(1, sig_level + 1)) < sig_dim:
+            d += 1
+        if sum(d**k for k in range(1, sig_level + 1)) != sig_dim:
+            raise ValueError(
+                f"A signature with {sig_dim} entries does not correspond to truncation "
+                f"level {sig_level} for any path dimension. The robust signature needs "
+                "the full (not log-) signature truncated at signature_level."
+            )
+        return [d**k for k in range(1, sig_level + 1)]
 
     def _solve_polynomial_scipy(self, coeffs_np):
         """Fallback to scipy for polynomial solving."""
@@ -187,75 +179,70 @@ class NadarayaWatsonSignature(BaseEstimator):
         
         return torch.tensor(roots, dtype=torch.float32)
 
-    def _robustsignature(self, X, C=1.0, a_param=1.0):
+    def _robustsignature(self, X, sig_level, C=1.0, a_param=1.0):
         """
-        Compute robust signature directly from signature tensor X.
-        
+        Compute robust (tensor-normalised) signatures from signature tensor X.
+
+        Each signature is rescaled by the dilation delta_lambda, which multiplies
+        signature level k by lambda**k. The factor lambda is chosen per sample so
+        that the result has squared norm psi(||X||):
+
+            1 + sum_k lambda**(2k) ||X_k||^2 = psi(sqrt(1 + ||X||^2)),
+
+        where X_k is level k (d**k entries for a d-dimensional path) and the
+        leading 1 is the constant level 0.
+
         Parameters
         ----------
-        X : torch.Tensor
-            Input signature tensor of shape (M, deg).
+        X : torch.Tensor of shape (M, sig_dim)
+            Truncated signatures, levels 1..sig_level (no constant level 0),
+            in the layout returned by iisignature.sig.
+        sig_level : int
+            Truncation level of X.
         C : float
             Robust parameter C.
         a_param : float
             Robust parameter a.
-            
+
         Returns
         -------
-        Robust : torch.Tensor
+        Robust : torch.Tensor of shape (M, sig_dim)
             Transformed robust signatures.
         """
         # Convert to PyTorch if not already
         if not isinstance(X, torch.Tensor):
             X = torch.tensor(X, dtype=torch.float32)
-        
-        # Validation
-        M, deg = X.shape
-        if deg == 0:
-            return X.clone()  # Return input if it's empty
-        
-        device = X.device
-        
-        # Step 1: Compute polynomial coefficients
-        poly_coeffs = torch.zeros((M, 2*deg+1), device=device)
-        
-        # Compute first coefficient (vectorized)
-        norms = torch.sqrt(1+torch.norm(X, dim=1)**2)
 
-        #1-psi(||X||)
+        M, sig_dim = X.shape
+        if sig_dim == 0:
+            return X.clone()  # Return input if it's empty
+
+        device = X.device
+
+        # Start/end index of each signature level in X
+        level_sizes = self._signature_level_sizes(sig_dim, sig_level)
+        bounds = np.cumsum([0] + level_sizes)
+
+        # Step 1: polynomial in lambda, coefficients in increasing powers:
+        #   constant term 1 - psi(||X||), coefficient of lambda**(2k) is ||X_k||^2
+        poly_coeffs = torch.zeros((M, 2 * sig_level + 1), device=device)
+        norms = torch.sqrt(1 + torch.norm(X, dim=1)**2)
         poly_coeffs[:, 0] = 1 - self._psi_torch(norms, C=C, a=a_param)
-        
-        # Compute remaining coefficients
-        sum_idx = 0
-        for l in range(deg):
-            coeff_size = 2**(l+1)
-            end_idx = min(sum_idx + coeff_size, X.shape[1])
-            if sum_idx < X.shape[1]:
-                X_slice = X[:, sum_idx:end_idx]
-                poly_coeffs[:, 2*(l+1)] = torch.norm(X_slice, dim=1)**2
-            
-            sum_idx = end_idx
-        
+        for k in range(sig_level):
+            poly_coeffs[:, 2 * (k + 1)] = torch.norm(X[:, bounds[k]:bounds[k + 1]], dim=1)**2
+
         # Step 2: Use scipy to solve polynomial equations
         XX = self._solve_polynomial_scipy(poly_coeffs.cpu().numpy())
         XX = XX.to(device)
-        
-        # Step 3: Apply scaling to get robust signature
-        Robust = torch.zeros_like(X)
-        
-        sum_idx = 0
-        for k in range(deg):
-            coeff_size = 2**(k+1)
-            end_idx = min(sum_idx + coeff_size, X.shape[1])
-            
-            if sum_idx < X.shape[1]:
-                scale_factor = XX**(k+1)
-                Robust[:, sum_idx:end_idx] = X[:, sum_idx:end_idx] * scale_factor.unsqueeze(-1)
-            
-            sum_idx = end_idx
-        
+
+        # Step 3: Apply the dilation: level k is multiplied by lambda**k
+        Robust = torch.empty_like(X)
+        for k in range(sig_level):
+            scale_factor = XX**(k + 1)
+            Robust[:, bounds[k]:bounds[k + 1]] = X[:, bounds[k]:bounds[k + 1]] * scale_factor.unsqueeze(-1)
+
         return Robust
-    
+
     def _compute_signatures(self, paths: np.ndarray, sig_level: Optional[int] = None) -> np.ndarray:
         """
         Compute path signatures from raw path data.
@@ -566,7 +553,7 @@ class NadarayaWatsonSignature(BaseEstimator):
                     try:
                         X_sig_robust = self._robustsignature(
                             torch.tensor(X_sig, dtype=torch.float32, device=self.device),
-                            C=robust_C, a_param=robust_a
+                            sig_level=sig_level, C=robust_C, a_param=robust_a
                         ).cpu().numpy()
                     except Exception as e:
                         print(f"    Failed to compute robust signatures: {e}")
@@ -925,6 +912,7 @@ class NadarayaWatsonSignature(BaseEstimator):
             if self.robust:
                 X_sig = self._robustsignature(
                     torch.tensor(X_sig, dtype=torch.float32, device=self.device),
+                    sig_level=self.best_signature_level_,
                     C=self.best_robust_C_, a_param=self.best_robust_a_
                 ).cpu().numpy()
             
@@ -988,6 +976,7 @@ class NadarayaWatsonSignature(BaseEstimator):
             if self.robust:
                 X_sig = self._robustsignature(
                     torch.tensor(X_sig, dtype=torch.float32, device=self.device),
+                    sig_level=self.best_signature_level_,
                     C=self.best_robust_C_, a_param=self.best_robust_a_
                 ).cpu().numpy()
         
