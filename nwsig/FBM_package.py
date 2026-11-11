@@ -3,7 +3,7 @@
 """
 Created on Mon Dec  5 11:09:53 2022
 
-@author: 
+@author:
 """
 
 """Generate realizations of fractional Brownian motion, with small change that it also outputs the brownian Motion itself
@@ -117,17 +117,17 @@ class FBM(object):
         self._method = value
         self._fgn = self._methods[self.method]
         self._changed = True
-    
+
     #The following function is changed such that it always outputs additionally a Brownian motion from the same sample
-    
-    
+
+
     def fbm(self):
         """Sample the fractional Brownian motion."""
         F = self.fgn()
         fbm = F[0].cumsum(axis=0) #shape (N,M)
         fBm = np.zeros(shape =(self.n+1,self.M))
         fBm[1:self.n+1,:]= fbm
-        
+
         return fBm,F[0], F[1]
     def fgn(self):
         """Sample the fractional Gaussian noise."""
@@ -141,7 +141,7 @@ class FBM(object):
             return fgn * scale, gn.transpose() * scaleBM
 
         # Scale to interval [0, L]
-        
+
 
     def times(self):
         """Get times associated with the fbm/fgn samples."""
@@ -225,23 +225,23 @@ class FBM(object):
         stochastic processes. University of Aarhus. Centre for Mathematical
         Physics and Stochastics (MaPhySto)[MPS].
         """
-        
+
         # Monte carlo consideration
         if self._C is None or self._changed:
-            
+
             # Generate covariance matrix
             G = np.zeros([self.n, self.n])
             for i in range(self.n):
                 for j in range(i + 1):
                     G[i, j] = self._autocovariance(i - j)
-                    
+
             # Cholesky decomposition
             self._C = np.linalg.cholesky(G)
             self._changed = False
-            
+
 
         # Generate fgn
-        
+
         fgn = np.dot(self._C, np.array(gn).transpose())  # shape (n, M)
         return fgn
 

@@ -57,4 +57,3 @@ def MSE(y_true, y_pred):
     """
     return np.mean((y_true - y_pred) ** 2)
 #Todo: p-variation metric/alpha-Hölder metrc
-

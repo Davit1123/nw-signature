@@ -32,11 +32,11 @@ def _logsig_spec(dim: int, level: int):
 class NadarayaWatsonSignature(BaseEstimator):
     """
     Nadaraya-Watson estimator using path signatures for regression and classification.
-    
+
     This estimator implements the Nadaraya-Watson kernel regression/classification
-    using path signatures as features. It supports both raw path data and 
+    using path signatures as features. It supports both raw path data and
     pre-computed signatures as input.
-    
+
     Parameters
     ----------
     signature_level : int, optional (default=2)
@@ -87,7 +87,7 @@ class NadarayaWatsonSignature(BaseEstimator):
     verbose : bool, optional (default=False)
         Print progress (cross-validation results, selected hyperparameters).
     """
-    
+
     # Grids used for hyperparameters that are not fixed and have no grid given
     _DEFAULT_BANDWIDTH_GRID = (0.001, 0.005, 0.01, 0.05, 0.1, 0.5)
     _DEFAULT_ROBUST_C_GRID = (1.0, 2.0, 5.0, 10.0)
@@ -148,7 +148,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         """Validate the parameters (called by fit)."""
         if self.task_type not in ['regression', 'classification']:
             raise ValueError("task_type must be 'regression' or 'classification'")
-        
+
         if self.input_type not in ['paths', 'signatures']:
             raise ValueError("input_type must be 'paths' or 'signatures'")
 
@@ -158,10 +158,10 @@ class NadarayaWatsonSignature(BaseEstimator):
             raise ValueError("input_type='signatures' requires metric_choice='signature_metric'")
         if self.metric_choice in ('pvar', 'lp') and not (self.p_param is not None and self.p_param >= 1):
             raise ValueError(f"p_param must be >= 1 for metric_choice={self.metric_choice!r}, got {self.p_param}")
-        
+
         if self.signature_level < 1:
             raise ValueError("signature_level must be >= 1")
-        
+
         if self.cv_folds < 2:
             raise ValueError("cv_folds must be >= 2")
 
@@ -192,7 +192,7 @@ class NadarayaWatsonSignature(BaseEstimator):
                 "signature rescales signature level k by lambda**k, which is defined "
                 "for the signature, not the log-signature."
             )
-    
+
     def _psi_torch(self, x, C, a):
         """Vectorized psi function using PyTorch."""
         return torch.where(
@@ -316,14 +316,14 @@ class NadarayaWatsonSignature(BaseEstimator):
     def _compute_signatures(self, paths: np.ndarray, sig_level: Optional[int] = None) -> np.ndarray:
         """
         Compute path signatures from raw path data.
-        
+
         Parameters
         ----------
         paths : array-like of shape (n_samples, n_timesteps, n_dimensions)
             Raw path data.
         sig_level : int, optional
             Signature level to use. If None, uses self.signature_level.
-            
+
         Returns
         -------
         signatures : array-like of shape (n_samples, signature_dim)
@@ -331,31 +331,29 @@ class NadarayaWatsonSignature(BaseEstimator):
         """
         if paths.ndim != 3:
             raise ValueError("Paths must be 3D array of shape (n_samples, n_timesteps, n_dimensions)")
-        
+
         if sig_level is None:
             sig_level = self.signature_level
-        
+
         # iisignature computes a whole batch of paths of shape (n_samples, n_timesteps, d)
         paths = np.ascontiguousarray(paths, dtype=np.float64)
         if self.log_signature:
             return ii.logsig(paths, _logsig_spec(paths.shape[-1], sig_level))
         return ii.sig(paths, sig_level)
-            
-        
-        
-    
+
+
     def _signature_distance_matrix(self, X1: torch.Tensor, X2: torch.Tensor,Y1: torch.Tensor, Y2: torch.Tensor) -> torch.Tensor:
         """
         Compute pairwise Euclidean distances between signature vectors.
         This matches the direct NumPy implementation exactly.
-        
+
         Parameters
         ----------
         X1 : torch.Tensor of shape (n1, signature_dim)
             First set of signatures.
         X2 : torch.Tensor of shape (n2, signature_dim)
             Second set of signatures.
-            
+
         Returns
         -------
         distances : torch.Tensor of shape (n1, n2)
@@ -367,8 +365,8 @@ class NadarayaWatsonSignature(BaseEstimator):
         else:
             return torch.cdist(X1, X2, p=2)
 
-    
-    def _pairwise_path_distance(self, 
+
+    def _pairwise_path_distance(self,
                                 X1: torch.Tensor,     # (n1, T, d)
                                 X2: torch.Tensor,     # (n2, T, d)
                                 Y1: torch.Tensor,
@@ -378,7 +376,7 @@ class NadarayaWatsonSignature(BaseEstimator):
                                ) -> torch.Tensor:
         """
         Returns (n1, n2) matrix of path distances between X1 and X2.
-    
+
         kind:
           - "sup":   sup_t ||X1[i,t]-X2[j,t]||_2
           - "l2":    (sum_t w_t * ||...||_2^2)^{1/2}; if weights=None uses 1/T average
@@ -391,14 +389,14 @@ class NadarayaWatsonSignature(BaseEstimator):
         n1, T, d = X1.shape
         n2 = X2.shape[0]
         assert X2.shape[1:] == (T, d)
-    
+
         if kind == "pvar":
             # Run the fast Numba backend on CPU (float64), then map back to original device/dtype
             X1_np = X1.detach().to("cpu", torch.float64).numpy()
             X2_np = X2.detach().to("cpu", torch.float64).numpy()
             M_np  = pvar_backbone_matrix_numba(X1_np, X2_np, float(p))**(1/p)  # (n1, n2)
             out   = torch.from_numpy(M_np).to(device=X1.device, dtype=X1.dtype)
-    
+
         elif kind == "var1":
             if T < 2:
                 out = torch.zeros((n1, n2), device=X1.device, dtype=X1.dtype)
@@ -409,12 +407,12 @@ class NadarayaWatsonSignature(BaseEstimator):
                 B = dX2.transpose(0, 1).contiguous()   # (T-1, n2, d)
                 D = torch.cdist(A, B, p=2)             # (T-1, n1, n2)
                 out = D.sum(dim=0)                     # (n1, n2)
-    
+
         else:
             A = X1.transpose(0, 1).contiguous()        # (T, n1, d)
             B = X2.transpose(0, 1).contiguous()        # (T, n2, d)
             D = torch.cdist(A, B, p=2)                 # (T, n1, n2)
-    
+
             if kind == "supremum_metric":
                 out = D.amax(dim=0)
             else:
@@ -424,7 +422,7 @@ class NadarayaWatsonSignature(BaseEstimator):
                 else:
                     w = weights.to(device=D.device, dtype=D.dtype)
                     assert w.shape == (T,)
-    
+
                 if kind == "l2":
                     out = torch.einsum("tij,t->ij", D.pow(2), w).clamp_min_(0).sqrt_()
                 elif kind == "l1":
@@ -433,19 +431,12 @@ class NadarayaWatsonSignature(BaseEstimator):
                     out = torch.einsum("tij,t->ij", D.pow(p), w).clamp_min_(0).pow(1.0 / p)
                 else:
                     raise ValueError(f"Unknown kind={kind}")
-    
+
         if getattr(self, "initial_condition", False):
             out = out + torch.cdist(Y1, Y2, p=2)
         return out
 
 
-
-
-
- 
-
-
-    
     @staticmethod
     def _kernel_weights(distances: torch.Tensor, bandwidth: float) -> torch.Tensor:
         """
@@ -478,7 +469,7 @@ class NadarayaWatsonSignature(BaseEstimator):
 
         # Weighted prediction: sum_j w_ij * y_j
         return weights @ y_train
-    
+
     def _nw_predict_classification(self, X_test: torch.Tensor,X0_test: torch.Tensor, X_train: torch.Tensor, X0_train: torch.Tensor,
                                   y_train: torch.Tensor, bandwidth: float) -> Tuple[torch.Tensor, torch.Tensor]:
         """Nadaraya-Watson classification prediction."""
@@ -486,7 +477,7 @@ class NadarayaWatsonSignature(BaseEstimator):
             distances = self._signature_distance_matrix(X_test, X_train,X0_test,X0_train)
         else:
             distances = self._pairwise_path_distance(X_test, X_train,X0_test,X0_train,kind = self.metric_choice)
-        
+
         # Normalised kernel weights; each row sums to 1, so the class probabilities do too
         weights = self._kernel_weights(distances, bandwidth)
 
@@ -500,7 +491,7 @@ class NadarayaWatsonSignature(BaseEstimator):
 
         pred_classes = torch.argmax(pred_probs, dim=1)
         return pred_classes, pred_probs
-    
+
     def _log(self, message: str) -> None:
         """Progress output, shown if verbose=True."""
         if self.verbose:
@@ -674,7 +665,7 @@ class NadarayaWatsonSignature(BaseEstimator):
     def fit(self, X: np.ndarray, y: np.ndarray, X0: Optional[np.ndarray] = None):
         """
         Fit the Nadaraya-Watson estimator.
-        
+
         Parameters
         ----------
         X : array-like
@@ -685,7 +676,7 @@ class NadarayaWatsonSignature(BaseEstimator):
             Target values.
         X0 : array-like of shape (n_samples, n_features) or (n_samples,), optional
             Initial conditions. Required if initial_condition=True, ignored otherwise.
-            
+
         Returns
         -------
         self : object
@@ -817,12 +808,11 @@ class NadarayaWatsonSignature(BaseEstimator):
         names = [p for p in inspect.signature(NadarayaWatsonSignature.__init__).parameters
                  if p != 'self']
         return {name: getattr(self, name) for name in names}
-    
 
 
 class NWSignatureRegressor(RegressorMixin, NadarayaWatsonSignature):
     """Nadaraya-Watson Signature Regressor."""
-    
+
     def __init__(self, **kwargs):
         kwargs['task_type'] = 'regression'
         super().__init__(**kwargs)
@@ -834,7 +824,7 @@ class NWSignatureRegressor(RegressorMixin, NadarayaWatsonSignature):
 
 class NWSignatureClassifier(ClassifierMixin, NadarayaWatsonSignature):
     """Nadaraya-Watson Signature Classifier."""
-    
+
     def __init__(self, **kwargs):
         kwargs['task_type'] = 'classification'
         super().__init__(**kwargs)
