@@ -814,20 +814,20 @@ class NadarayaWatsonSignature(BaseEstimator):
                     except Exception as e:
                         continue
                     
-                    # Process fold results
-                    if len(fold_scores) > 0:
-                        avg_score = np.mean(fold_scores)
-                            
-                        # For regression: lower MSE is better
-                        # For classification: higher accuracy is better
-                        if ((self.task_type == 'regression' and avg_score < best_score) or
-                            (self.task_type == 'classification' and avg_score > best_score)):
-                            best_score = avg_score
-                            best_bandwidth = bandwidth
-    
-                                
-                            param_str = f"bandwidth={bandwidth}"
-                            print(f"    New best: {param_str}, score={avg_score:.6f}")
+            # Process fold results
+            if len(fold_scores) > 0:
+                avg_score = np.mean(fold_scores)
+
+                # For regression: lower MSE is better
+                # For classification: higher accuracy is better
+                if ((self.task_type == 'regression' and avg_score < best_score) or
+                    (self.task_type == 'classification' and avg_score > best_score)):
+                    best_score = avg_score
+                    best_bandwidth = bandwidth
+
+
+                    param_str = f"bandwidth={bandwidth}"
+                    print(f"    New best: {param_str}, score={avg_score:.6f}")
                 
                 
         
