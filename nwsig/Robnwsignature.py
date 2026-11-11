@@ -1014,36 +1014,21 @@ class NadarayaWatsonSignature(BaseEstimator):
             
         
     
-    def predict(self, X: np.ndarray, X0: Optional[np.ndarray] = None) -> np.ndarray:
+    def _prepare_test_data(self, X: np.ndarray, X0: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Make predictions on test data.
-        
-        Parameters
-        ----------
-        X : array-like
-            Test data with same format as training data.
-        X0 : array-like of shape (n_samples, n_features) or (n_samples,), optional
-            Initial conditions of the test data. Required if initial_condition=True,
-            ignored otherwise.
-            
-        Returns
-        -------
-        predictions : array-like of shape (n_samples,)
-            Predicted values or class labels.
+        Put test data into the representation the model was trained on.
+
+        For the signature metric: signatures at the selected level, robustly
+        normalised with the selected (C, a) if robust=True. For the path
+        metrics: the raw paths. X0 must already be resolved by _resolve_X0.
         """
-        if self.X_train_ is None:
-            raise ValueError("Model must be fitted before making predictions")
-        
-        X = np.array(X)
-        X0 = self._resolve_X0(X0, X.shape[0])
-        
         if self.metric_choice == "signature_metric":
             # Compute signatures if needed
             if self.input_type == 'paths':
                 X_sig = self._compute_signatures(X, self.best_signature_level_)
             else:
                 X_sig = X
-        
+
             # Apply robust signature transformation if enabled
             if self.robust:
                 X_sig = self._robustsignature(
@@ -1051,14 +1036,37 @@ class NadarayaWatsonSignature(BaseEstimator):
                     sig_level=self.best_signature_level_,
                     C=self.best_robust_C_, a_param=self.best_robust_a_
                 ).cpu().numpy()
-        
-            X_test = torch.tensor(X_sig, dtype=torch.float32, device=self.device)
-            X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device)
 
+            X_test = torch.tensor(X_sig, dtype=torch.float32, device=self.device)
         else:
             X_test = torch.tensor(X, dtype=torch.float32, device=self.device)
-            X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device)
-        
+
+        X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device)
+        return X_test, X0_test
+
+    def predict(self, X: np.ndarray, X0: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Make predictions on test data.
+
+        Parameters
+        ----------
+        X : array-like
+            Test data with same format as training data.
+        X0 : array-like of shape (n_samples, n_features) or (n_samples,), optional
+            Initial conditions of the test data. Required if initial_condition=True,
+            ignored otherwise.
+
+        Returns
+        -------
+        predictions : array-like of shape (n_samples,)
+            Predicted values or class labels.
+        """
+        if self.X_train_ is None:
+            raise ValueError("Model must be fitted before making predictions")
+
+        X = np.array(X)
+        X0 = self._resolve_X0(X0, X.shape[0])
+        X_test, X0_test = self._prepare_test_data(X, X0)
 
         if self.task_type == 'regression':
             predictions = self._nw_predict_regression(X_test,X0_test, self.X_train_, self.X0_train_,self.y_train_, self.best_bandwidth_)
@@ -1066,11 +1074,11 @@ class NadarayaWatsonSignature(BaseEstimator):
         else:
             pred_classes, _ = self._nw_predict_classification(X_test,X0_test, self.X_train_,self.X0_train_,self.y_train_, self.best_bandwidth_)
             return self.label_encoder_.inverse_transform(pred_classes.cpu().numpy())
-    
+
     def predict_proba(self, X: np.ndarray, X0: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Predict class probabilities (classification only).
-        
+
         Parameters
         ----------
         X : array-like
@@ -1078,36 +1086,27 @@ class NadarayaWatsonSignature(BaseEstimator):
         X0 : array-like of shape (n_samples, n_features) or (n_samples,), optional
             Initial conditions of the test data. Required if initial_condition=True,
             ignored otherwise.
-            
+
         Returns
         -------
         probabilities : array-like of shape (n_samples, n_classes)
-            Predicted class probabilities.
+            Predicted class probabilities. Columns follow the sorted class labels,
+            self.label_encoder_.classes_; predict returns the label of the
+            largest column.
         """
         if self.task_type != 'classification':
             raise ValueError("predict_proba is only available for classification tasks")
-        
+
         if self.X_train_ is None:
             raise ValueError("Model must be fitted before making predictions")
-        
+
         X = np.array(X)
         X0 = self._resolve_X0(X0, X.shape[0])
-        
-        # Compute signatures if needed
-        if self.input_type == 'paths':
-            temp_signature_level = self.signature_level
-            self.signature_level = self.best_signature_level_
-            X_sig = self._compute_signatures(X)
-            self.signature_level = temp_signature_level
-        else:
-            X_sig = X
-        
-        X_test = torch.tensor(X_sig, dtype=torch.float32, device=self.device)
-        X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device)
+        X_test, X0_test = self._prepare_test_data(X, X0)
+
         _, pred_probs = self._nw_predict_classification(X_test,X0_test, self.X_train_,self.X0_train_,self.y_train_, self.best_bandwidth_)
-        
         return pred_probs.cpu().numpy()
-    
+
     def get_params(self, deep=True):
         """Get parameters for this estimator."""
         return {
