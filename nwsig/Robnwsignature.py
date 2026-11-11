@@ -10,7 +10,7 @@ import iisignature as ii
 import functools
 import inspect
 import warnings
-import scipy as sc
+from scipy.optimize import brentq
 from typing import Union, Optional, Tuple, List
 from .p_var_vectorized import pvar_backbone_matrix_numba
 
@@ -229,17 +229,6 @@ class NadarayaWatsonSignature(BaseEstimator):
                 "for the signature, not the log-signature."
             )
 
-    def _psi_torch(self, x, C, a):
-        """
-        The function psi of the tensor normalisation (Chevyrev and Oberhauser):
-        psi(x) = x^2 for x <= sqrt(C), and C + C^(1+a) (C^(-a) - x^(-2a)) / a otherwise.
-        """
-        return torch.where(
-            x <= torch.sqrt(torch.tensor(C, dtype=x.dtype, device=x.device)),
-            x**2,
-            C + C**(1+a) * (C**(-a) - x**(-2*a)) / a
-        )
-
     @staticmethod
     def _signature_level_sizes(sig_dim: int, sig_level: int) -> List[int]:
         """
@@ -261,32 +250,39 @@ class NadarayaWatsonSignature(BaseEstimator):
             )
         return [d**k for k in range(1, sig_level + 1)]
 
-    def _solve_polynomial_scipy(self, coeffs_np):
+    @staticmethod
+    def _normalising_factors(level_sq: np.ndarray, C: float, a: float) -> np.ndarray:
         """
-        Find, for each row, the normalising factor lambda >= 0 of the robust signature.
+        Normalising factor lambda of the robust signature for each sample.
 
-        coeffs_np has shape (M, 2*sig_level+1), with polynomial coefficients in
-        increasing powers of lambda. For C >= 1 the polynomial is <= 0 at
-        lambda = 0 and >= 0 at lambda = 1, so a root always exists.
+        level_sq[m, k-1] is the squared norm |S_k|^2 of signature level k. The
+        factor solves
+
+            sum_k lambda^(2k) |S_k|^2 = psi(|S|) - 1,   |S|^2 = 1 + sum_k |S_k|^2,
+
+        with the function psi of Chevyrev and Oberhauser: psi(x) = x^2 for
+        x^2 <= C, and C + C^(1+a) (C^(-a) - x^(-2a)) / a otherwise. Where psi is
+        the identity, lambda = 1. Otherwise psi(|S|) - 1 is evaluated as
+        (C - 1) + (C / a) (1 - (C / |S|^2)^a) in float64, which avoids the
+        cancellation of 1 - psi(|S|) for small signatures, and lambda is the root
+        in [0, 1] (it exists for C >= 1).
         """
-        if not np.all(np.isfinite(coeffs_np)):
+        if not np.all(np.isfinite(level_sq)):
             raise ValueError("Robust signature: the signatures contain NaN or inf values.")
 
-        M = coeffs_np.shape[0]
-        roots = np.zeros(M)
-
-        for m in range(M):
-            poly = np.poly1d(coeffs_np[m][::-1])
+        norm_sq = 1.0 + level_sq.sum(axis=1)
+        powers = 2 * np.arange(1, level_sq.shape[1] + 1)
+        lam = np.ones(len(level_sq))
+        for m in np.nonzero(norm_sq > C)[0]:
+            target = (C - 1.0) + (C / a) * (1.0 - (C / norm_sq[m]) ** a)
             try:
-                roots[m] = sc.optimize.brentq(poly, 0, 10000)
+                lam[m] = brentq(lambda l: np.dot(l ** powers, level_sq[m]) - target, 0.0, 1.0, xtol=1e-15)
             except ValueError as e:
                 raise ValueError(
-                    f"Robust signature: no normalising factor exists for sample {m} "
-                    f"(polynomial value {poly(0):.3g} > 0 at lambda = 0). "
+                    f"Robust signature: no normalising factor exists for sample {m}. "
                     "This happens when robust_C < 1."
                 ) from e
-
-        return torch.tensor(roots, dtype=torch.float32)
+        return lam
 
     def _robustsignature(self, X, sig_level, C=1.0, a_param=1.0):
         """
@@ -332,17 +328,10 @@ class NadarayaWatsonSignature(BaseEstimator):
         level_sizes = self._signature_level_sizes(sig_dim, sig_level)
         bounds = np.cumsum([0] + level_sizes)
 
-        # Step 1: polynomial in lambda, coefficients in increasing powers:
-        #   constant term 1 - psi(||X||), coefficient of lambda**(2k) is ||X_k||^2
-        poly_coeffs = torch.zeros((M, 2 * sig_level + 1), device=device)
-        norms = torch.sqrt(1 + torch.norm(X, dim=1)**2)
-        poly_coeffs[:, 0] = 1 - self._psi_torch(norms, C=C, a=a_param)
-        for k in range(sig_level):
-            poly_coeffs[:, 2 * (k + 1)] = torch.norm(X[:, bounds[k]:bounds[k + 1]], dim=1)**2
-
-        # Step 2: Use scipy to solve polynomial equations
-        XX = self._solve_polynomial_scipy(poly_coeffs.cpu().numpy())
-        XX = XX.to(device)
+        # Steps 1-2: squared norm of each level (float64) and normalising factors
+        X64 = X.detach().cpu().double().numpy()
+        level_sq = np.stack([(X64[:, bounds[k]:bounds[k + 1]] ** 2).sum(axis=1) for k in range(sig_level)], axis=1)
+        XX = torch.tensor(self._normalising_factors(level_sq, C, a_param), dtype=X.dtype, device=device)
 
         # Step 3: Apply the dilation: level k is multiplied by lambda**k
         Robust = torch.empty_like(X)
