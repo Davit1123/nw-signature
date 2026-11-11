@@ -3,9 +3,10 @@ import torch
 import torch.nn.functional as F
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
 from sklearn.model_selection import KFold, StratifiedKFold
-from sklearn.metrics import mean_squared_error, accuracy_score
+from sklearn.metrics import mean_squared_error, accuracy_score, r2_score
 from sklearn.preprocessing import LabelEncoder
 import iisignature as ii
+import inspect
 import warnings
 import scipy as sc
 from typing import Union, Optional, Tuple, List
@@ -35,7 +36,7 @@ class NadarayaWatsonSignature(BaseEstimator):
     cv_folds : int, optional (default=5)
         Number of cross-validation folds for hyperparameter selection.
     signature_mode : int, optional (default=2)
-        iisignature computation mode (1 or 2).
+        iisignature output format (0, 1 or 2). All three give the same signature.
     bandwidth_grid : array-like, optional (default=None)
         Grid of bandwidth values for cross-validation. If None, uses default grid.
     signature_level_grid : array-like, optional (default=None)
@@ -138,6 +139,9 @@ class NadarayaWatsonSignature(BaseEstimator):
         
         if self.cv_folds < 2:
             raise ValueError("cv_folds must be >= 2")
+
+        if self.signature_mode not in (0, 1, 2):
+            raise ValueError("signature_mode must be 0, 1 or 2 (iisignature output format)")
 
         if self.robust:
             # For C < 1 the robust signature is not defined for paths with small
@@ -310,9 +314,12 @@ class NadarayaWatsonSignature(BaseEstimator):
         else:
             for i in range(paths.shape[0]):
                 sig = ii.sig(paths[i], sig_level, self.signature_mode)
-                
-                # Take final signature if matrix output
-                if sig.ndim > 1:
+
+                if self.signature_mode == 1:
+                    # Format 1: one array per signature level
+                    sig = np.concatenate(sig)
+                elif sig.ndim > 1:
+                    # Format 2: signatures of all prefixes; keep the whole path's
                     sig = sig[-1, :]
                 
                 signatures.append(sig)
@@ -510,34 +517,32 @@ class NadarayaWatsonSignature(BaseEstimator):
             # Fallback case (shouldn't happen, but for safety)
             self.signature_level_grid = [2]  # or some default
         
-        # Create parameter grids for robust parameters
+        # Candidate values: a value fixed by the user stays fixed, otherwise use the grid
+        bandwidths = [self.bandwidth] if self.bandwidth is not None else list(self.bandwidth_grid)
         if self.robust:
-            if self.robust_C is not None and self.robust_a is not None:
-                # Fixed robust parameters
-                robust_param_grid = [(self.robust_C, self.robust_a)]
-                print(f"Using fixed robust parameters: C={self.robust_C}, a={self.robust_a}")
-            else:
-                # CV over robust parameters
-                robust_param_grid = [(C, a) for C in self.robust_C_grid for a in self.robust_a_grid]
-                print(f"CV over robust parameters: {len(self.robust_C_grid)} C values, {len(self.robust_a_grid)} a values")
+            C_values = [self.robust_C] if self.robust_C is not None else list(self.robust_C_grid)
+            a_values = [self.robust_a] if self.robust_a is not None else list(self.robust_a_grid)
+            robust_param_grid = [(C, a) for C in C_values for a in a_values]
+            print(f"Robust parameters: C in {C_values}, a in {a_values}")
         else:
+            C_values, a_values = [None], [None]
             robust_param_grid = [(None, None)]  # No robust parameters
         
         total_combinations = (len(self.signature_level_grid) * 
-                            len(self.bandwidth_grid) * 
+                            len(bandwidths) * 
                             len(robust_param_grid))
         
         print(f"Cross-validation: Testing {total_combinations} total parameter combinations")
         print(f"  Signature levels: {len(self.signature_level_grid)}")
-        print(f"  Bandwidths: {len(self.bandwidth_grid)}")
+        print(f"  Bandwidths: {len(bandwidths)}")
         if self.robust:
             print(f"  Robust parameters: {len(robust_param_grid)}")
         
         best_score = np.inf  # For MSE, lower is better for regression
-        best_bandwidth = self.bandwidth_grid[0]
+        best_bandwidth = bandwidths[0]
         best_signature_level = self.signature_level_grid[0]
-        best_robust_C = self.robust_C_grid[0] if self.robust and self.robust_C_grid else None
-        best_robust_a = self.robust_a_grid[0] if self.robust and self.robust_a_grid else None
+        best_robust_C = C_values[0]
+        best_robust_a = a_values[0]
         total_attempts = 0
         successful_attempts = 0
         
@@ -598,7 +603,7 @@ class NadarayaWatsonSignature(BaseEstimator):
                 n_samples = X_sig_robust.shape[0]
                 fold_size = n_samples // self.cv_folds
                 
-                for bandwidth in self.bandwidth_grid:
+                for bandwidth in bandwidths:
                     fold_scores = []
                     
                     for fold in range(self.cv_folds):
@@ -702,18 +707,16 @@ class NadarayaWatsonSignature(BaseEstimator):
         
         if successful_attempts == 0:
             print("ERROR: No successful CV attempts! Using default parameters.")
-            best_bandwidth = self.bandwidth_grid[0]
+            best_bandwidth = bandwidths[0]
             best_signature_level = self.signature_level_grid[0]
-            if self.robust:
-                best_robust_C = self.robust_C_grid[0] if self.robust_C_grid else 1.0
-                best_robust_a = self.robust_a_grid[0] if self.robust_a_grid else 1.0
+            best_robust_C = C_values[0]
+            best_robust_a = a_values[0]
         elif best_score == np.inf or best_score == -np.inf:
             print("WARNING: No improvement found in CV, using default parameters.")
-            best_bandwidth = self.bandwidth_grid[0]
+            best_bandwidth = bandwidths[0]
             best_signature_level = self.signature_level_grid[0]
-            if self.robust:
-                best_robust_C = self.robust_C_grid[0] if self.robust_C_grid else 1.0
-                best_robust_a = self.robust_a_grid[0] if self.robust_a_grid else 1.0
+            best_robust_C = C_values[0]
+            best_robust_a = a_values[0]
         
         if self.task_type == 'regression':
             print(f"Best CV MSE: {best_score:.6f}")
@@ -933,7 +936,11 @@ class NadarayaWatsonSignature(BaseEstimator):
         
         print(f"Fitting NW estimator with input_type='{self.input_type}'")
         print(f"Input shape: {X.shape}, target shape: {y.shape}")
-        print(f"Target statistics: mean={y.mean():.6f}, std={y.std():.6f}, range=[{y.min():.6f}, {y.max():.6f}]")
+        if self.task_type == 'regression':
+            print(f"Target statistics: mean={y.mean():.6f}, std={y.std():.6f}, range=[{y.min():.6f}, {y.max():.6f}]")
+        else:
+            labels, counts = np.unique(y, return_counts=True)
+            print(f"Classes: {len(labels)}, samples per class: min={counts.min()}, max={counts.max()}")
         
         # Handle classification labels
         if self.task_type == 'classification':
@@ -960,9 +967,11 @@ class NadarayaWatsonSignature(BaseEstimator):
                 X_sig = X
                 print(f"Signature statistics: mean={X_sig.mean():.6f}, std={X_sig.std():.6f}")
             
-            # Cross-validation for hyperparameter selection
-            if self.bandwidth is None:
-                print("Starting cross-validation for bandwidth selection...")
+            # Cross-validation for every hyperparameter that is not fixed
+            needs_cv = self.bandwidth is None or (
+                self.robust and (self.robust_C is None or self.robust_a is None))
+            if needs_cv:
+                print("Starting cross-validation for hyperparameter selection...")
                 self.best_bandwidth_, self.best_signature_level_,self.best_robust_C_, self.best_robust_a_ = self._cross_validate(X,X0, y)
                 print(f"Cross-validation completed. Best bandwidth: {self.best_bandwidth_}")
             else:
@@ -1108,24 +1117,10 @@ class NadarayaWatsonSignature(BaseEstimator):
         return pred_probs.cpu().numpy()
 
     def get_params(self, deep=True):
-        """Get parameters for this estimator."""
-        return {
-            'signature_level': self.signature_level,
-            'bandwidth': self.bandwidth,
-            'task_type': self.task_type,
-            'use_gpu': self.use_gpu,
-            'input_type': self.input_type,
-            'cv_folds': self.cv_folds,
-            'signature_mode': self.signature_mode,
-            'bandwidth_grid': self.bandwidth_grid,
-            'signature_level_grid': self.signature_level_grid,
-            'robust': self.robust,
-            'robust_C': self.robust_C,
-            'robust_a': self.robust_a,
-            'robust_C_grid': self.robust_C_grid,
-            'robust_a_grid': self.robust_a_grid,
-            'random_state': self.random_state
-        }
+        """Get parameters for this estimator (all arguments of __init__)."""
+        names = [p for p in inspect.signature(NadarayaWatsonSignature.__init__).parameters
+                 if p != 'self']
+        return {name: getattr(self, name) for name in names}
     
     def set_params(self, **params):
         """Set parameters for this estimator."""
@@ -1141,6 +1136,10 @@ class NWSignatureRegressor(NadarayaWatsonSignature, RegressorMixin):
         kwargs['task_type'] = 'regression'
         super().__init__(**kwargs)
 
+    def score(self, X, y, sample_weight=None, X0=None):
+        """R^2 of the predictions; X0 is only needed with initial_condition=True."""
+        return r2_score(y, self.predict(X, X0), sample_weight=sample_weight)
+
 
 class NWSignatureClassifier(NadarayaWatsonSignature, ClassifierMixin):
     """Nadaraya-Watson Signature Classifier."""
@@ -1148,3 +1147,7 @@ class NWSignatureClassifier(NadarayaWatsonSignature, ClassifierMixin):
     def __init__(self, **kwargs):
         kwargs['task_type'] = 'classification'
         super().__init__(**kwargs)
+
+    def score(self, X, y, sample_weight=None, X0=None):
+        """Accuracy of the predictions; X0 is only needed with initial_condition=True."""
+        return accuracy_score(y, self.predict(X, X0), sample_weight=sample_weight)

@@ -215,7 +215,6 @@ class FBM(object):
         # Resulting z is fft of sequence w. Discard small imaginary part (z
         # should be real in theory).
         z = np.fft.fft(w)
-        print(z.shape)
         fgn = z[:,: self.n].real
         return fgn.transpose()
 
@@ -243,8 +242,7 @@ class FBM(object):
 
         # Generate fgn
         
-        fgn = np.dot(self._C, np.array(gn).transpose())
-        fgn = np.squeeze(fgn)
+        fgn = np.dot(self._C, np.array(gn).transpose())  # shape (n, M)
         return fgn
 
     def _hosking(self, gn):
@@ -284,15 +282,15 @@ class FBM(object):
         return fgn.transpose()
 
 
-def fbm(n, hurst, length=1, method="daviesharte"):
-    """One off sample of fBm."""
-    f = FBM(n, hurst, length, method)
+def fbm(n, hurst, length=1, method="daviesharte", M=1):
+    """One-off sample of M fBm paths; returns (fBm, fGn, BM) as FBM.fbm()."""
+    f = FBM(n=n, M=M, hurst=hurst, length=length, method=method)
     return f.fbm()
 
 
-def fgn(n, hurst, length=1, method="daviesharte"):
-    """One off sample of fGn."""
-    f = FBM(n, hurst, length, method)
+def fgn(n, hurst, length=1, method="daviesharte", M=1):
+    """One-off sample of M fGn paths; returns (fGn, BM increments) as FBM.fgn()."""
+    f = FBM(n=n, M=M, hurst=hurst, length=length, method=method)
     return f.fgn()
 
 
