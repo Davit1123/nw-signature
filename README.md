@@ -1,6 +1,6 @@
 # Nadaraya-Watson Signature Estimator
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Overview
@@ -20,14 +20,23 @@ The method is described in
 
 ## Installation
 
+Install the package directly from GitHub:
+
+```bash
+pip install git+https://github.com/Davit1123/nw-signature.git
+```
+
+To run the example notebooks or the tests, clone the repository and install it
+with the optional dependencies:
+
 ```bash
 git clone https://github.com/Davit1123/nw-signature.git
 cd nw-signature
-pip install -r requirements.txt
+pip install -e ".[examples,test]"
 ```
 
-The package `nwsig` is used from the repository root; the example notebooks add
-it to the Python path.
+The extra `kernel` installs `sigkernel`, which is only needed for
+`nwsig.metrics.full_sig_metric`.
 
 ## Quick Start
 
@@ -143,7 +152,7 @@ jupyter notebook
 
 ## Running the tests
 
-From the repository root:
+From the repository root, after installing with the `test` extra:
 
 ```bash
 pytest

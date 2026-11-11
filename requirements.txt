@@ -1,18 +1,3 @@
-# Core dependencies
-numpy>=1.20.0
-torch>=2.0.0
-scipy>=1.7.0
-scikit-learn>=1.0.0
-numba>=0.56.0
-
-# Signature computation
-iisignature>=0.24
-
-# Time series datasets (for examples)
-aeon>=0.6.0
-
-# Optional dependencies
-matplotlib>=3.5.0  # For visualization in examples
-jupyter>=1.0.0     # For running notebooks
-pytest>=7.0        # For running the tests
-# sigkernel        # Only needed for nwsig.metrics.full_sig_metric (pip install sigkernel)
+# The dependencies are declared in pyproject.toml. Run from the repository root
+# to install the package (editable) with the dependencies of the examples and tests:
+-e .[examples,test]

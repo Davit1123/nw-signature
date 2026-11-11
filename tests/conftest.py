@@ -1,12 +1,6 @@
 """Shared fixtures for the test suite."""
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
-
-# The package is used from the repository root (it is not installed).
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def _make_paths(n, n_timesteps=41, dim=2, scale=1.0, seed=0):
