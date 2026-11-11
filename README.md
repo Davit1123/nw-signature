@@ -97,6 +97,30 @@ regressor.fit(X_train, y_train, X0=X_train[:, 0, :])
 y_pred = regressor.predict(X_test, X0=X_test[:, 0, :])
 ```
 
+### Learned signature distances (experimental)
+
+`NWLearnedDistanceRegressor` and `NWLearnedDistanceClassifier` use the same
+(robust) signature representation `z` but learn the distance between
+signatures by minimising the leave-one-out loss of the estimator (squared error
+for regression, cross-entropy for classification), with Gaussian weights
+`exp(-d^2 / (2 h^2))`:
+
+- `distance="levels"`: one weight per signature level,
+  `d^2 = sum_k exp(eta_k) |z^(k)(x) - z^(k)(x')|^2`, initialised at 1.
+
+```python
+from nwsig import NWLearnedDistanceClassifier
+
+model = NWLearnedDistanceClassifier(signature_level=3, distance="levels").fit(X_train, y_train)
+print(model.level_weights_, model.loo_loss_init_, model.loo_loss_)
+```
+
+Note that `bandwidth` is the length scale `h` of `exp(-d^2 / (2 h^2))` here,
+not the `h` of `exp(-d^2 / h)` used by `NWSignatureRegressor`. With
+`max_iter=0` the estimator is the unweighted one with `h` chosen by
+leave-one-out. `examples/learned_distance_benchmark.py` compares the variants
+on the classification datasets of notebook 01.
+
 ## Hyperparameter selection
 
 Every hyperparameter that you fix is used as given; every one left as `None` is

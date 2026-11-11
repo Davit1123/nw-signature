@@ -11,6 +11,12 @@ from .Robnwsignature import (
     NWSignatureClassifier
 )
 
+from .learned_distance import (
+    NWLearnedDistance,
+    NWLearnedDistanceRegressor,
+    NWLearnedDistanceClassifier
+)
+
 from .metrics import (
     MSE,
     supremum_metric,
@@ -34,6 +40,9 @@ __all__ = [
     "NadarayaWatsonSignature",
     "NWSignatureRegressor",
     "NWSignatureClassifier",
+    "NWLearnedDistance",
+    "NWLearnedDistanceRegressor",
+    "NWLearnedDistanceClassifier",
     "MSE",
     "supremum_metric",
     "euclidean_metric",
