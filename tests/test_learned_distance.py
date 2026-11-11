@@ -222,6 +222,23 @@ def test_selects_representation_by_loo(regression_data):
             assert model.loo_loss_init_ <= other.loo_loss_init_ + 1e-12
 
 
+def test_default_bandwidth_grid_reaches_the_uniform_limit(make_paths):
+    """
+    With a few outlying paths the distances are heavy-tailed. The default grid
+    must reach bandwidths at which the weights are (almost) uniform, so the
+    selected LOO loss is at most that of uniform weights, which is known
+    exactly: sample i gets probability (n_{y_i} - 1) / (n - 1) for its class.
+    """
+    for seed in range(3):
+        X = make_paths(40, seed=seed)
+        X[:3] *= 20
+        y = np.random.default_rng(seed).integers(0, 2, 40)
+        model = NWLearnedDistanceClassifier(signature_level=3, max_iter=0).fit(X, y)
+        counts = np.bincount(y)
+        uniform = -np.mean(np.log((counts[y] - 1) / (len(y) - 1)))
+        assert model.loo_loss_init_ <= uniform + 0.01
+
+
 def test_loo_subsample(regression_data):
     X, y = regression_data
     fit = lambda: NWLearnedDistanceRegressor(signature_level=3, loo_max_samples=25).fit(X[:60], y[:60])

@@ -102,8 +102,10 @@ class NWLearnedDistance(NadarayaWatsonSignature):
         NadarayaWatsonSignature, whose bandwidth h' enters as exp(-d^2 / h')
         (h' = 2 h^2). If None, h is selected by LOO.
     bandwidth_grid : array-like, optional (default=None)
-        Grid of h values. If None, the grid is the median distance between
-        training samples times np.geomspace(1e-3, 3, 31).
+        Grid of h values. If None, the grid is log-spaced (ratio
+        3000**(1/30) ~ 1.31) from 1e-3 times the median distance between
+        training samples to at least 10 times the largest distance, where the
+        weights are within 0.5% of uniform.
     **kwargs
         The other parameters of NadarayaWatsonSignature (signature_level,
         signature_level_grid, log_signature, robust, robust_C, robust_a, their
@@ -134,8 +136,12 @@ class NWLearnedDistance(NadarayaWatsonSignature):
     """
 
     _DISTANCES = ('levels', 'projection')
-    # Default bandwidths, relative to the median distance between training samples
-    _RELATIVE_BANDWIDTH_GRID = tuple(np.geomspace(1e-3, 3.0, 31))
+    # Default bandwidth grid: from _GRID_START times the median distance between
+    # training samples, in steps of _GRID_RATIO, to at least _GRID_STOP times
+    # the largest distance
+    _GRID_START = 1e-3
+    _GRID_RATIO = 3000.0 ** (1 / 30)
+    _GRID_STOP = 10.0
     # Adam stops when the LOO loss has not decreased by a relative _TOL for _PATIENCE steps
     _PATIENCE = 25
     _TOL = 1e-6
@@ -275,7 +281,13 @@ class NWLearnedDistance(NadarayaWatsonSignature):
         return loss
 
     def _bandwidth_candidates(self, d2: torch.Tensor, rows: np.ndarray):
-        """Fixed bandwidth, given grid, or a grid relative to the median distance."""
+        """
+        Fixed bandwidth, given grid, or the default grid from the median to
+        beyond the largest distance. The grid must reach the largest distance:
+        a sample far from all others has its weight on its nearest neighbour
+        unless h is of the order of its distances, and if that neighbour has
+        another class its cross-entropy can dominate the LOO loss.
+        """
         if self.bandwidth is not None:
             return [self.bandwidth]
         if self.bandwidth_grid is not None:
@@ -287,8 +299,9 @@ class NWLearnedDistance(NadarayaWatsonSignature):
         if len(distances) == 0:
             raise ValueError("All training samples have the same features. Check the path data "
                              "format: (n_samples, n_timesteps, n_features).")
-        median = float(distances.median())
-        return [median * c for c in self._RELATIVE_BANDWIDTH_GRID]
+        start, stop = self._GRID_START * float(distances.median()), self._GRID_STOP * float(distances.max())
+        n_steps = int(np.ceil(np.log(stop / start) / np.log(self._GRID_RATIO)))
+        return [start * self._GRID_RATIO ** k for k in range(n_steps + 1)]
 
     def _initial_model(self, X, rows, loo_loss):
         """
