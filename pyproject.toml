@@ -39,7 +39,7 @@ test = ["pytest>=7.0"]
 
 [project.urls]
 Repository = "https://github.com/Davit1123/nw-signature"
-Paper = "https://arxiv.org/abs/2510.16728"
+Paper = "https://proceedings.mlr.press/v300/bayer26a.html"
 
 [tool.setuptools]
 packages = ["nwsig"]

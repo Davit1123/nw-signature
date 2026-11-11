@@ -16,7 +16,8 @@ m(x) = sum_i w_i(x) y_i,    w_i(x) = exp(-d(x, x_i)^2 / h) / sum_j exp(-d(x, x_j
 where the distance `d` is a signature metric (the distance between truncated
 path signatures, optionally robustly normalised) or a classical path metric.
 The method is described in
-[*Local regression on path spaces with signature metrics*](https://arxiv.org/abs/2510.16728).
+[*Local Regression on Path Spaces with Signature Metrics*](https://proceedings.mlr.press/v300/bayer26a.html)
+(AISTATS 2026).
 
 ## Installation
 
@@ -176,12 +177,22 @@ See `requirements.txt` for the full list.
 
 ## Citation
 
+If you use this code, please cite:
+
 ```bibtex
-@article{bayer2025local,
-  title   = {Local regression on path spaces with signature metrics},
-  author  = {Bayer, Christian and Gogolashvili, Davit and Pelizzari, Luca},
-  journal = {arXiv preprint arXiv:2510.16728},
-  year    = {2025}
+@InProceedings{pmlr-v300-bayer26a,
+  title     = {Local Regression on Path Spaces with Signature Metrics},
+  author    = {Bayer, Christian and Gogolashvili, Davit and Pelizzari, Luca},
+  booktitle = {Proceedings of The 29th International Conference on Artificial Intelligence and Statistics},
+  pages     = {2755--2763},
+  year      = {2026},
+  editor    = {Khan, Emtiyaz and Li, Yingzhen and Solin, Arno and Ramdas, Aaditya},
+  volume    = {300},
+  series    = {Proceedings of Machine Learning Research},
+  month     = {02--05 May},
+  publisher = {PMLR},
+  pdf       = {https://raw.githubusercontent.com/mlresearch/v300/main/assets/bayer26a/bayer26a.pdf},
+  url       = {https://proceedings.mlr.press/v300/bayer26a.html}
 }
 ```
 
