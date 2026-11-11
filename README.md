@@ -26,15 +26,12 @@ import numpy as np
 # Your time series data: shape (n_samples, n_timesteps, n_features)
 X_train = np.random.randn(100, 50, 3)
 y_train = np.random.randint(0, 2, 100)
-
-# Extract initial conditions
-X0_train = X_train[:, 0, :]
-X0_test = X_test[:, 0, :]
+X_test = np.random.randn(20, 50, 3)
 
 # Fit and predict
 classifier = NWSignatureClassifier(signature_level=2, cv_folds=5)
-classifier.fit(X_train, X0_train, y_train)
-y_pred = classifier.predict(X_test, X0_test)
+classifier.fit(X_train, y_train)
+y_pred = classifier.predict(X_test)
 ```
 
 ### Regression
@@ -43,8 +40,21 @@ y_pred = classifier.predict(X_test, X0_test)
 from nwsig import NWSignatureRegressor
 
 regressor = NWSignatureRegressor(signature_level=2, cv_folds=5)
-regressor.fit(X_train, X0_train, y_train)
-y_pred = regressor.predict(X_test, X0_test)
+regressor.fit(X_train, y_train)
+y_pred = regressor.predict(X_test)
+```
+
+### Including the initial condition
+
+Signatures are invariant to translations of a path, so by default the starting
+value of each path is ignored. To include it, set `initial_condition=True` and
+pass the initial conditions `X0`. The distance then becomes
+`|x0 - y0| + rho(x, y)`, where `rho` is the chosen path metric:
+
+```python
+regressor = NWSignatureRegressor(signature_level=2, initial_condition=True)
+regressor.fit(X_train, y_train, X0=X_train[:, 0, :])
+y_pred = regressor.predict(X_test, X0=X_test[:, 0, :])
 ```
 
 ## Examples
@@ -69,13 +79,14 @@ jupyter notebook
 - `cv_folds` (int): Number of CV folds (default: 5)
 - `robust` (bool): Use robust signature transformations (default: False)
 - `metric_choice` (str): Distance metric - `'signature_metric'`, `'supremum_metric'`, `'l1'`, `'l2'`, `'pvar'`
+- `initial_condition` (bool): Include the initial condition `X0` in the distance (default: False)
 
 ## Input Format
 
 ```python
 X: shape (n_samples, n_timesteps, n_features)  # Path data
-X0: shape (n_samples, n_features)               # Initial conditions (X[:, 0, :])
 y: shape (n_samples,)                           # Target values
+X0: shape (n_samples, n_features)               # Initial conditions, only with initial_condition=True
 ```
 
 ## Dependencies

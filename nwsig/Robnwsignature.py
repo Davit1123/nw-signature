@@ -56,6 +56,12 @@ class NadarayaWatsonSignature(BaseEstimator):
         If None, uses [0.5, 1.0, 1.5, 2.0].
     random_state : int, optional (default=42)
         Random state for reproducibility.
+    initial_condition : bool, optional (default=False)
+        Whether to include the initial condition X0 in the distance. Signatures
+        are invariant to translations of the path, so by default the starting
+        value is ignored. If True, X0 must be passed to fit and predict, and the
+        distance becomes |x0 - y0| + rho(x, y), with rho the chosen path metric.
+        X0 is used as given (it is not rescaled in robust mode).
     """
     
     def __init__(
@@ -76,7 +82,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         robust_C_grid: Optional[List[float]] = None,
         robust_a_grid: Optional[List[float]] = None,
         random_state: int = 42,
-        initial_condition: bool = True,
+        initial_condition: bool = False,
         metric_choice: str = 'signature_metric',
         p_param: Optional[float] = 2,
     ):
@@ -618,10 +624,6 @@ class NadarayaWatsonSignature(BaseEstimator):
                         y_train_fold = y_cv[train_indices]
                         y_val_fold = y_cv[val_indices]
 
-                        if self.robust:
-                            #normalizing the initial condition to bring it to the same scale..
-                            X0_train_fold = X0_train_fold*X_train_fold[:,0][:,None]
-                            X0_val_fold = X0_val_fold*X_val_fold[:,0][:,None]
                         # Validate fold data
                         if X_train_fold.shape[0] == 0 or X_val_fold.shape[0] == 0:
                             continue
@@ -866,7 +868,37 @@ class NadarayaWatsonSignature(BaseEstimator):
             
         return best_bandwidth
     
-    def fit(self, X: np.ndarray,X0: np.ndarray, y: np.ndarray):
+    def _resolve_X0(self, X0, n_samples: int) -> np.ndarray:
+        """
+        Validate the initial conditions passed to fit/predict.
+
+        With initial_condition=False, X0 is not used and a zero placeholder of
+        shape (n_samples, 1) is returned, so the internal code paths stay uniform.
+        """
+        if not self.initial_condition:
+            if X0 is not None:
+                warnings.warn(
+                    "X0 is ignored because initial_condition=False. Set "
+                    "initial_condition=True to include it in the distance.",
+                    UserWarning, stacklevel=3,
+                )
+            return np.zeros((n_samples, 1))
+        if X0 is None:
+            raise ValueError(
+                "initial_condition=True requires X0, an array of shape "
+                "(n_samples, n_features) with the initial condition of each sample."
+            )
+        X0 = np.asarray(X0, dtype=float)
+        if X0.ndim == 1:
+            X0 = X0[:, None]
+        if X0.ndim != 2 or X0.shape[0] != n_samples:
+            raise ValueError(
+                f"X0 must have shape (n_samples, n_features) with n_samples={n_samples}, "
+                f"got {X0.shape}"
+            )
+        return X0
+
+    def fit(self, X: np.ndarray, y: np.ndarray, X0: Optional[np.ndarray] = None):
         """
         Fit the Nadaraya-Watson estimator.
         
@@ -878,6 +910,8 @@ class NadarayaWatsonSignature(BaseEstimator):
             - If input_type='signatures': shape (n_samples, signature_dim)
         y : array-like of shape (n_samples,)
             Target values.
+        X0 : array-like of shape (n_samples, n_features) or (n_samples,), optional
+            Initial conditions. Required if initial_condition=True, ignored otherwise.
             
         Returns
         -------
@@ -888,8 +922,14 @@ class NadarayaWatsonSignature(BaseEstimator):
         self._validate_parameters()
 
         X = np.array(X)
-        X0 = np.array(X0)
         y = np.array(y)
+        if X0 is not None and y.ndim == 2 and np.ndim(X0) == 1:
+            raise TypeError(
+                "fit() takes (X, y, X0=None), but it looks like it was called with the old "
+                "argument order fit(X, X0, y). Use fit(X, y), or fit(X, y, X0=X0) together "
+                "with initial_condition=True."
+            )
+        X0 = self._resolve_X0(X0, X.shape[0])
         
         print(f"Fitting NW estimator with input_type='{self.input_type}'")
         print(f"Input shape: {X.shape}, target shape: {y.shape}")
@@ -948,8 +988,6 @@ class NadarayaWatsonSignature(BaseEstimator):
             
             self.X_train_ = torch.tensor(X_sig, dtype=torch.float32, device=self.device)
             self.X0_train_ = torch.tensor(X0, dtype=torch.float32, device=self.device)
-            if self.robust:
-                self.X0_train_ = torch.tensor(X0, dtype=torch.float32, device=self.device)*X_sig[:,0][:,None]
     
             
             print(f"Training completed. Final training data shape: {self.X_train_.shape}")
@@ -976,7 +1014,7 @@ class NadarayaWatsonSignature(BaseEstimator):
             
         
     
-    def predict(self, X: np.ndarray,X0: np.ndarray) -> np.ndarray:
+    def predict(self, X: np.ndarray, X0: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Make predictions on test data.
         
@@ -984,6 +1022,9 @@ class NadarayaWatsonSignature(BaseEstimator):
         ----------
         X : array-like
             Test data with same format as training data.
+        X0 : array-like of shape (n_samples, n_features) or (n_samples,), optional
+            Initial conditions of the test data. Required if initial_condition=True,
+            ignored otherwise.
             
         Returns
         -------
@@ -994,6 +1035,7 @@ class NadarayaWatsonSignature(BaseEstimator):
             raise ValueError("Model must be fitted before making predictions")
         
         X = np.array(X)
+        X0 = self._resolve_X0(X0, X.shape[0])
         
         if self.metric_choice == "signature_metric":
             # Compute signatures if needed
@@ -1011,11 +1053,7 @@ class NadarayaWatsonSignature(BaseEstimator):
                 ).cpu().numpy()
         
             X_test = torch.tensor(X_sig, dtype=torch.float32, device=self.device)
-            if self.robust:
-                X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device)*X_test[:,0][:,None]
-                #X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device)
-            else:
-                X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device)
+            X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device)
 
         else:
             X_test = torch.tensor(X, dtype=torch.float32, device=self.device)
@@ -1029,7 +1067,7 @@ class NadarayaWatsonSignature(BaseEstimator):
             pred_classes, _ = self._nw_predict_classification(X_test,X0_test, self.X_train_,self.X0_train_,self.y_train_, self.best_bandwidth_)
             return self.label_encoder_.inverse_transform(pred_classes.cpu().numpy())
     
-    def predict_proba(self, X: np.ndarray,X0: np.ndarray) -> np.ndarray:
+    def predict_proba(self, X: np.ndarray, X0: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Predict class probabilities (classification only).
         
@@ -1037,6 +1075,9 @@ class NadarayaWatsonSignature(BaseEstimator):
         ----------
         X : array-like
             Test data.
+        X0 : array-like of shape (n_samples, n_features) or (n_samples,), optional
+            Initial conditions of the test data. Required if initial_condition=True,
+            ignored otherwise.
             
         Returns
         -------
@@ -1050,6 +1091,7 @@ class NadarayaWatsonSignature(BaseEstimator):
             raise ValueError("Model must be fitted before making predictions")
         
         X = np.array(X)
+        X0 = self._resolve_X0(X0, X.shape[0])
         
         # Compute signatures if needed
         if self.input_type == 'paths':
