@@ -54,9 +54,11 @@ class NadarayaWatsonSignature(BaseEstimator):
         Deprecated and ignored: every iisignature output format gives the same
         signature. Will be removed in a future version.
     bandwidth_grid : array-like, optional (default=None)
-        Grid of bandwidth values for cross-validation. If None, uses default grid.
+        Grid of bandwidth values for cross-validation (used if bandwidth is None).
+        If None, uses [0.001, 0.005, 0.01, 0.05, 0.1, 0.5].
     signature_level_grid : array-like, optional (default=None)
-        Grid of signature levels for cross-validation. If None, uses default grid.
+        Grid of signature levels for cross-validation. If None, signature_level
+        is used.
     robust : bool, optional (default=False)
         Whether to use robust signature transformations.
     robust_C : float, optional (default=None)
@@ -81,6 +83,11 @@ class NadarayaWatsonSignature(BaseEstimator):
         X0 is used as given (it is not rescaled in robust mode).
     """
     
+    # Grids used for hyperparameters that are not fixed and have no grid given
+    _DEFAULT_BANDWIDTH_GRID = (0.001, 0.005, 0.01, 0.05, 0.1, 0.5)
+    _DEFAULT_ROBUST_C_GRID = (1.0, 2.0, 5.0, 10.0)
+    _DEFAULT_ROBUST_A_GRID = (0.5, 1.0, 1.5, 2.0)
+
     def __init__(
         self,
         signature_level: int = 2,
@@ -156,6 +163,17 @@ class NadarayaWatsonSignature(BaseEstimator):
         if self.cv_folds < 2:
             raise ValueError("cv_folds must be >= 2")
 
+
+        if self.bandwidth is not None and not self.bandwidth > 0:
+            raise ValueError(f"bandwidth must be > 0, got {self.bandwidth}")
+        for name, grid in [("bandwidth_grid", self.bandwidth_grid), ("signature_level_grid", self.signature_level_grid),
+                           ("robust_C_grid", self.robust_C_grid), ("robust_a_grid", self.robust_a_grid)]:
+            if grid is not None and len(grid) == 0:
+                raise ValueError(f"{name} must not be empty")
+        if self.bandwidth_grid is not None and np.any(np.asarray(self.bandwidth_grid, dtype=float) <= 0):
+            raise ValueError(f"bandwidth_grid must contain only values > 0, got {self.bandwidth_grid}")
+        if self.signature_level_grid is not None and any(int(l) != l or l < 1 for l in self.signature_level_grid):
+            raise ValueError(f"signature_level_grid must contain integers >= 1, got {self.signature_level_grid}")
 
         if self.robust:
             # For C < 1 the robust signature is not defined for paths with small
@@ -481,392 +499,147 @@ class NadarayaWatsonSignature(BaseEstimator):
         pred_classes = torch.argmax(pred_probs, dim=1)
         return pred_classes, pred_probs
     
-    def _cross_validate(self, X: np.ndarray,X0: np.ndarray, y: np.ndarray) -> Tuple[float, int]:
+    def _log(self, message: str) -> None:
+        """Progress output."""
+        print(message)
+
+    @staticmethod
+    def _describe(bandwidth, level, robust_C, robust_a) -> str:
+        """Human-readable hyperparameter combination."""
+        parts = [f"bandwidth={bandwidth}"]
+        if level is not None:
+            parts.append(f"signature level={level}")
+        if robust_C is not None:
+            parts.append(f"C={robust_C}, a={robust_a}")
+        return ", ".join(parts)
+
+    def _hyperparameter_candidates(self):
         """
-        Perform cross-validation to select optimal hyperparameters
+        Candidate values of the hyperparameters.
+
+        A value fixed by the user is its only candidate; a value left as None
+        is selected from its grid (or the default grid). self is not modified.
+
+        Returns
+        -------
+        levels : list
+            Signature levels (``[None]`` for the path metrics).
+        bandwidths : list
+            Kernel bandwidths.
+        robust_params : list of (C, a)
+            Robust parameters (``[(None, None)]`` without robust signatures).
         """
-        # Set default grids if not provided
-        if self.bandwidth_grid is None:
-            self.bandwidth_grid = [0.001, 0.005, 0.01, 0.05, 0.1, 0.5]
-        
-        # Set default robust parameter grids
-        if self.robust and self.robust_C_grid is None:
-            self.robust_C_grid = [1.0, 2.0, 5.0, 10.0]
-        if self.robust and self.robust_a_grid is None:
-            self.robust_a_grid = [0.5, 1.0, 1.5, 2.0]
-        
-        ## Logic for signature level CV:
-        if self.input_type == 'signatures':
-            # For pre-computed signatures, only CV over bandwidth (and robust params if enabled)
-            self.signature_level_grid = [self.signature_level]
-            print("Using pre-computed signatures, no CV on signature levels.")
-        elif self.signature_level_grid is not None:
-            # Use the provided signature_level_grid for CV
-            pass  # self.signature_level_grid is already set
-        elif self.signature_level is not None:
-            # Use fixed signature_level (no CV on levels)
-            self.signature_level_grid = [self.signature_level]
-        elif self.signature_level is None and self.signature_level_grid is None:
-            # Neither specified -> use default grid for CV
-            self.signature_level_grid = [1, 2, 3]
+        bandwidth_grid = self._DEFAULT_BANDWIDTH_GRID if self.bandwidth_grid is None else self.bandwidth_grid
+        bandwidths = [self.bandwidth] if self.bandwidth is not None else list(bandwidth_grid)
+
+        if self.metric_choice != "signature_metric":
+            return [None], bandwidths, [(None, None)]
+
+        # Pre-computed signatures come with a fixed level
+        if self.input_type == 'signatures' or self.signature_level_grid is None:
+            levels = [self.signature_level]
         else:
-            # Fallback case (shouldn't happen, but for safety)
-            self.signature_level_grid = [2]  # or some default
-        
-        # Candidate values: a value fixed by the user stays fixed, otherwise use the grid
-        bandwidths = [self.bandwidth] if self.bandwidth is not None else list(self.bandwidth_grid)
+            levels = list(self.signature_level_grid)
+
         if self.robust:
-            C_values = [self.robust_C] if self.robust_C is not None else list(self.robust_C_grid)
-            a_values = [self.robust_a] if self.robust_a is not None else list(self.robust_a_grid)
-            robust_param_grid = [(C, a) for C in C_values for a in a_values]
-            print(f"Robust parameters: C in {C_values}, a in {a_values}")
+            C_grid = self._DEFAULT_ROBUST_C_GRID if self.robust_C_grid is None else self.robust_C_grid
+            a_grid = self._DEFAULT_ROBUST_A_GRID if self.robust_a_grid is None else self.robust_a_grid
+            C_values = [self.robust_C] if self.robust_C is not None else list(C_grid)
+            a_values = [self.robust_a] if self.robust_a is not None else list(a_grid)
+            robust_params = [(C, a) for C in C_values for a in a_values]
         else:
-            C_values, a_values = [None], [None]
-            robust_param_grid = [(None, None)]  # No robust parameters
-        
-        total_combinations = (len(self.signature_level_grid) * 
-                            len(bandwidths) * 
-                            len(robust_param_grid))
-        
-        print(f"Cross-validation: Testing {total_combinations} total parameter combinations")
-        print(f"  Signature levels: {len(self.signature_level_grid)}")
-        print(f"  Bandwidths: {len(bandwidths)}")
+            robust_params = [(None, None)]
+        return levels, bandwidths, robust_params
+
+    def _features(self, X: np.ndarray, level, robust_C, robust_a, signatures=None) -> torch.Tensor:
+        """
+        Representation of X used by the distance.
+
+        For the signature metric: the signatures at the given level, robustly
+        normalised with (robust_C, robust_a) if robust=True; signatures already
+        computed at that level can be passed to avoid recomputing them. For the
+        path metrics: the paths themselves.
+        """
+        if self.metric_choice != "signature_metric":
+            return torch.tensor(X, dtype=torch.float32, device=self.device)
+        if signatures is None:
+            signatures = self._compute_signatures(X, level) if self.input_type == 'paths' else X
+        features = torch.tensor(signatures, dtype=torch.float32, device=self.device)
         if self.robust:
-            print(f"  Robust parameters: {len(robust_param_grid)}")
-        
-        best_score = np.inf  # For MSE, lower is better for regression
-        best_bandwidth = bandwidths[0]
-        best_signature_level = self.signature_level_grid[0]
-        best_robust_C = C_values[0]
-        best_robust_a = a_values[0]
-        total_attempts = 0
-        successful_attempts = 0
-        
-        # Handle classification labels if needed
-        if self.task_type == 'classification':
-            label_encoder_cv = LabelEncoder()
-            y_encoded = label_encoder_cv.fit_transform(y)
-            classes_cv = np.unique(y_encoded)
-            y_cv = y_encoded
-            # For classification, higher accuracy is better, so we'll track the best score differently
-            best_score = -np.inf
-        else:
-            y_cv = y
-        
-        for sig_level in self.signature_level_grid:
-            print(f"Testing signature level {sig_level}...")
-            
-            # Compute signatures if needed
-            if self.input_type == 'paths':
-                try:
-                    X_sig = self._compute_signatures(X, sig_level)
-                    print(f"Computed signatures shape: {X_sig.shape}")
-                    
-                    # Check signature quality
-                    if np.all(X_sig == 0):
-                        print(f"WARNING: All signatures are zero for level {sig_level}, skipping...")
-                        continue
-                    if np.var(X_sig) < 1e-15:
-                        print(f"WARNING: Very low signature variance for level {sig_level}: {np.var(X_sig)}")
-                        
-                except Exception as e:
-                    print(f"Failed to compute signatures for level {sig_level}: {e}")
-                    continue
-            else:
-                X_sig = X
-            
-            # Validate signature data
-            if X_sig.shape[0] == 0 or X_sig.shape[1] == 0:
-                print(f"Invalid signature shape: {X_sig.shape}, skipping level {sig_level}")
-                continue
-            
-            for robust_C, robust_a in robust_param_grid:
-                if self.robust:
-                    print(f"  Testing robust parameters C={robust_C}, a={robust_a}")
-                    # Apply robust signature transformation
-                    try:
-                        X_sig_robust = self._robustsignature(
-                            torch.tensor(X_sig, dtype=torch.float32, device=self.device),
-                            sig_level=sig_level, C=robust_C, a_param=robust_a
-                        ).cpu().numpy()
-                    except Exception as e:
-                        print(f"    Failed to compute robust signatures: {e}")
-                        continue
-                else:
-                    X_sig_robust = X_sig
-                
-                # Standard k-fold cross-validation
-                n_samples = X_sig_robust.shape[0]
-                fold_size = n_samples // self.cv_folds
-                
-                for bandwidth in bandwidths:
-                    fold_scores = []
-                    
-                    for fold in range(self.cv_folds):
-                        total_attempts += 1
-                        
-                        # Define validation fold
-                        val_start = fold * fold_size
-                        val_end = (fold + 1) * fold_size if fold < self.cv_folds - 1 else n_samples
-                        
-                        # Split data
-                        val_indices = np.arange(val_start, val_end)
-                        train_indices = np.concatenate([np.arange(0, val_start), 
-                                                       np.arange(val_end, n_samples)])
-                        
-                        if len(train_indices) == 0 or len(val_indices) == 0:
-                            continue
-                        
-                        # Get fold data
-                        X_train_fold = X_sig_robust[train_indices]
-                        X0_train_fold = X0[train_indices]
-                        X_val_fold = X_sig_robust[val_indices]
-                        X0_val_fold = X0[val_indices]
-                        y_train_fold = y_cv[train_indices]
-                        y_val_fold = y_cv[val_indices]
+            features = self._robustsignature(features, sig_level=level, C=robust_C, a_param=robust_a)
+        return features
 
-                        # Validate fold data
-                        if X_train_fold.shape[0] == 0 or X_val_fold.shape[0] == 0:
-                            continue
-                        
-                        try:
-                            # Convert to tensors
-                            X_train_tensor = torch.tensor(X_train_fold, dtype=torch.float32, device=self.device)
-                            X0_train_tensor = torch.tensor(X0_train_fold, dtype=torch.float32, device=self.device)
-                            X_val_tensor = torch.tensor(X_val_fold, dtype=torch.float32, device=self.device)
-                            X0_val_tensor = torch.tensor(X0_val_fold, dtype=torch.float32, device=self.device)
-                            y_train_tensor = torch.tensor(y_train_fold, dtype=torch.float32, device=self.device)
-                            
-                            # Validate tensor shapes
-                            if X_train_tensor.shape[1] != X_val_tensor.shape[1]:
-                                continue
-                            
-                            # Make predictions
-                            if self.task_type == 'regression':
-                                y_pred = self._nw_predict_regression(X_val_tensor,X0_val_tensor, X_train_tensor,X0_train_tensor, y_train_tensor, bandwidth)
-                                y_pred_np = y_pred.cpu().numpy()
-                                
-                                # Validate predictions
-                                if np.any(np.isnan(y_pred_np)) or np.any(np.isinf(y_pred_np)):
-                                    continue
-                                
-                                mse = mean_squared_error(y_val_fold, y_pred_np)
-                                fold_scores.append(mse)
-                                successful_attempts += 1
-                            
-                            else:  # Classification
-                                # Set temporary classes for this fold
-                                temp_classes = torch.tensor(classes_cv, device=self.device)
-                                original_classes = self.classes_
-                                self.classes_ = temp_classes
-                                
-                                y_pred_classes, _ = self._nw_predict_classification(X_val_tensor,X0_val_tensor, X_train_tensor,X0_train_tensor, y_train_tensor, bandwidth)
-                                y_pred_np = y_pred_classes.cpu().numpy()
-                                
-                                # Validate predictions
-                                if np.any(np.isnan(y_pred_np)) or np.any(np.isinf(y_pred_np)):
-                                    self.classes_ = original_classes
-                                    continue
-                                
-                                accuracy = accuracy_score(y_val_fold, y_pred_np)
-                                fold_scores.append(accuracy)
-                                successful_attempts += 1
-                                
-                                # Restore original classes
-                                self.classes_ = original_classes
-                                
-                        except Exception as e:
-                            continue
-                    
-                    # Process fold results
-                    if len(fold_scores) > 0:
-                        avg_score = np.mean(fold_scores)
-                        
-                        # For regression: lower MSE is better
-                        # For classification: higher accuracy is better
-                        if ((self.task_type == 'regression' and avg_score < best_score) or
-                            (self.task_type == 'classification' and avg_score > best_score)):
-                            best_score = avg_score
-                            best_bandwidth = bandwidth
-                            best_signature_level = sig_level
-                            if self.robust:
-                                best_robust_C = robust_C
-                                best_robust_a = robust_a
-                            
-                            param_str = f"level={sig_level}, bandwidth={bandwidth}"
-                            if self.robust:
-                                param_str += f", C={robust_C}, a={robust_a}"
-                            print(f"    New best: {param_str}, score={avg_score:.6f}")
-        
-        # Final validation
-        print(f"\nCV Summary: {successful_attempts}/{total_attempts} successful attempts")
-        
-        if successful_attempts == 0:
-            print("ERROR: No successful CV attempts! Using default parameters.")
-            best_bandwidth = bandwidths[0]
-            best_signature_level = self.signature_level_grid[0]
-            best_robust_C = C_values[0]
-            best_robust_a = a_values[0]
-        elif best_score == np.inf or best_score == -np.inf:
-            print("WARNING: No improvement found in CV, using default parameters.")
-            best_bandwidth = bandwidths[0]
-            best_signature_level = self.signature_level_grid[0]
-            best_robust_C = C_values[0]
-            best_robust_a = a_values[0]
-        
-        if self.task_type == 'regression':
-            print(f"Best CV MSE: {best_score:.6f}")
-        else:
-            print(f"Best CV Accuracy: {best_score:.6f}")
-            
-        return best_bandwidth, best_signature_level, best_robust_C, best_robust_a
-
-    def _cross_validate_non_signature(self, X: np.ndarray,X0: np.ndarray, y: np.ndarray) -> Tuple[float, int]:
-        """
-        Perform cross-validation to select bandwith, with traditional norms
-        """
-        # Set default grids if not provided
-        if self.bandwidth_grid is None:
-            self.bandwidth_grid = [0.001, 0.005, 0.01, 0.05, 0.1, 0.5]
-        
-        total_combinations = ( 
-                            len(self.bandwidth_grid))
-        
-        print(f"Cross-validation: Testing {total_combinations} total parameter combinations")
-        print(f"  Bandwidths: {len(self.bandwidth_grid)}")
-
-        best_score = np.inf  # For MSE, lower is better for regression
-        best_bandwidth = self.bandwidth_grid[0]
-        total_attempts = 0
-        successful_attempts = 0
-        
-        # Handle classification labels if needed
-        if self.task_type == 'classification':
-            label_encoder_cv = LabelEncoder()
-            y_encoded = label_encoder_cv.fit_transform(y)
-            classes_cv = np.unique(y_encoded)
-            y_cv = y_encoded
-            # For classification, higher accuracy is better, so we'll track the best score differently
-            best_score = -np.inf
-        else:
-            y_cv = y
-        # Standard k-fold cross-validation
-        n_samples = X.shape[0]
+    def _cv_folds(self, n_samples: int) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """(train, validation) index pairs of the K folds, contiguous blocks."""
         fold_size = n_samples // self.cv_folds
-        for bandwidth in self.bandwidth_grid:
-            fold_scores = []
-                    
-            for fold in range(self.cv_folds):
-                    total_attempts += 1
-                        
-                    # Define validation fold
-                    val_start = fold * fold_size
-                    val_end = (fold + 1) * fold_size if fold < self.cv_folds - 1 else n_samples
-                        
-                    # Split data
-                    val_indices = np.arange(val_start, val_end)
-                    train_indices = np.concatenate([np.arange(0, val_start), 
-                                                       np.arange(val_end, n_samples)])
-                        
-                    if len(train_indices) == 0 or len(val_indices) == 0:
+        folds = []
+        for fold in range(self.cv_folds):
+            start = fold * fold_size
+            end = (fold + 1) * fold_size if fold < self.cv_folds - 1 else n_samples
+            val = np.arange(start, end)
+            train = np.concatenate([np.arange(0, start), np.arange(end, n_samples)])
+            if len(train) > 0 and len(val) > 0:
+                folds.append((train, val))
+        return folds
+
+    def _cv_score(self, features: torch.Tensor, X0: torch.Tensor, y: np.ndarray,
+                  bandwidth: float, folds) -> float:
+        """
+        Mean validation MSE (regression) or accuracy (classification) over the
+        folds, or NaN if a fold produces non-finite predictions.
+        """
+        y_t = torch.tensor(y, dtype=torch.float32, device=self.device)
+        scores = []
+        for train, val in folds:
+            tr, va = torch.as_tensor(train), torch.as_tensor(val)
+            if self.task_type == 'regression':
+                pred = self._nw_predict_regression(features[va], X0[va], features[tr], X0[tr], y_t[tr], bandwidth)
+                if not torch.isfinite(pred).all():
+                    return float("nan")
+                scores.append(mean_squared_error(y[val], pred.cpu().numpy()))
+            else:
+                pred, _ = self._nw_predict_classification(features[va], X0[va], features[tr], X0[tr], y_t[tr], bandwidth)
+                scores.append(accuracy_score(y[val], pred.cpu().numpy()))
+        return float(np.mean(scores))
+
+    def _cross_validate(self, X: np.ndarray, X0: np.ndarray, y: np.ndarray,
+                        levels, bandwidths, robust_params) -> Tuple:
+        """
+        Select (bandwidth, signature level, C, a) by K-fold cross-validation.
+
+        Every combination of the candidates is scored by its mean validation
+        MSE (regression, lower is better) or accuracy (classification, higher
+        is better); ties go to the combination that comes first in grid order.
+        """
+        folds = self._cv_folds(len(y))
+        X0_t = torch.tensor(X0, dtype=torch.float32, device=self.device)
+        higher_is_better = self.task_type == 'classification'
+        score_name = "accuracy" if higher_is_better else "MSE"
+        self._log(f"Cross-validation over {len(levels) * len(bandwidths) * len(robust_params)} "
+                  f"combinations, {len(folds)} folds")
+
+        best, best_score = None, None
+        for level in levels:
+            signatures = None
+            if self.metric_choice == "signature_metric":
+                # compute the signatures once per level, reuse them for every (C, a)
+                signatures = self._compute_signatures(X, level) if self.input_type == 'paths' else X
+            for robust_C, robust_a in robust_params:
+                features = self._features(X, level, robust_C, robust_a, signatures=signatures)
+                for bandwidth in bandwidths:
+                    candidate = (bandwidth, level, robust_C, robust_a)
+                    score = self._cv_score(features, X0_t, y, bandwidth, folds)
+                    if np.isnan(score):
+                        self._log(f"  skipped {self._describe(*candidate)}: non-finite predictions")
                         continue
-                        
-                    # Get fold data
-                    X_train_fold = X[train_indices]
-                    X0_train_fold = X0[train_indices]
-                    X_val_fold = X[val_indices]
-                    X0_val_fold = X0[val_indices]
-                    y_train_fold = y_cv[train_indices]
-                    y_val_fold = y_cv[val_indices]
+                    if best_score is None or (score > best_score if higher_is_better else score < best_score):
+                        best, best_score = candidate, score
+                        self._log(f"  new best: {self._describe(*candidate)}, CV {score_name}={score:.6f}")
 
-    
-                    # Validate fold data
-                    if X_train_fold.shape[0] == 0 or X_val_fold.shape[0] == 0:
-                        continue
-                        
-                    try:
-                        # Convert to tensors
-                        X_train_tensor = torch.tensor(X_train_fold, dtype=torch.float32, device=self.device)
-                        X0_train_tensor = torch.tensor(X0_train_fold, dtype=torch.float32, device=self.device)
-                        X_val_tensor = torch.tensor(X_val_fold, dtype=torch.float32, device=self.device)
-                        X0_val_tensor = torch.tensor(X0_val_fold, dtype=torch.float32, device=self.device)
-                        y_train_tensor = torch.tensor(y_train_fold, dtype=torch.float32, device=self.device)
-                        # Validate tensor shapes
-                        if X_train_tensor.shape[1] != X_val_tensor.shape[1]:
-                            continue
-                            
-                        # Make predictions
-                        if self.task_type == 'regression':
-                            y_pred = self._nw_predict_regression(X_val_tensor,X0_val_tensor, X_train_tensor,X0_train_tensor, y_train_tensor, bandwidth)
-                            y_pred_np = y_pred.cpu().numpy()
-                                
-                            # Validate predictions
-                            if np.any(np.isnan(y_pred_np)) or np.any(np.isinf(y_pred_np)):
-                                continue
-                                
-                            mse = mean_squared_error(y_val_fold, y_pred_np)
-                            fold_scores.append(mse)
-                            successful_attempts += 1
-                            
-                        else:  # Classification
-                            # Set temporary classes for this fold
-                            temp_classes = torch.tensor(classes_cv, device=self.device)
-                            original_classes = self.classes_
-                            self.classes_ = temp_classes
-                                
-                            y_pred_classes, _ = self._nw_predict_classification(X_val_tensor,X0_val_tensor, X_train_tensor,X0_train_tensor, y_train_tensor, bandwidth)
-                            y_pred_np = y_pred_classes.cpu().numpy()
-                                
-                            # Validate predictions
-                            if np.any(np.isnan(y_pred_np)) or np.any(np.isinf(y_pred_np)):
-                                self.classes_ = original_classes
-                                continue
-                                
-                            accuracy = accuracy_score(y_val_fold, y_pred_np)
-                            fold_scores.append(accuracy)
-                            successful_attempts += 1
-                                
-                            # Restore original classes
-                            self.classes_ = original_classes
-                                
-                    except Exception as e:
-                        continue
-                    
-            # Process fold results
-            if len(fold_scores) > 0:
-                avg_score = np.mean(fold_scores)
+        if best is None:
+            raise ValueError("Cross-validation failed: every candidate produced non-finite predictions.")
+        return best
 
-                # For regression: lower MSE is better
-                # For classification: higher accuracy is better
-                if ((self.task_type == 'regression' and avg_score < best_score) or
-                    (self.task_type == 'classification' and avg_score > best_score)):
-                    best_score = avg_score
-                    best_bandwidth = bandwidth
-
-
-                    param_str = f"bandwidth={bandwidth}"
-                    print(f"    New best: {param_str}, score={avg_score:.6f}")
-                
-                
-        
-        # Final validation
-        print(f"\nCV Summary: {successful_attempts}/{total_attempts} successful attempts")
-        
-        if successful_attempts == 0:
-            print("ERROR: No successful CV attempts! Using default parameters.")
-            best_bandwidth = self.bandwidth_grid[0]
-            
-        elif best_score == np.inf or best_score == -np.inf:
-            print("WARNING: No improvement found in CV, using default parameters.")
-            best_bandwidth = self.bandwidth_grid[0]
-        
-        if self.task_type == 'regression':
-            print(f"Best CV MSE: {best_score:.6f}")
-        else:
-            print(f"Best CV Accuracy: {best_score:.6f}")
-            
-        return best_bandwidth
-    
     def _resolve_X0(self, X0, n_samples: int) -> np.ndarray:
         """
         Validate the initial conditions passed to fit/predict.
@@ -926,132 +699,54 @@ class NadarayaWatsonSignature(BaseEstimator):
                 FutureWarning, stacklevel=2,
             )
 
-        X = np.array(X)
-        y = np.array(y)
+        X = np.asarray(X)
+        y = np.asarray(y)
         if X0 is not None and y.ndim == 2 and np.ndim(X0) == 1:
             raise TypeError(
                 "fit() takes (X, y, X0=None), but it looks like it was called with the old "
                 "argument order fit(X, X0, y). Use fit(X, y), or fit(X, y, X0=X0) together "
                 "with initial_condition=True."
             )
+        if X.shape[0] != y.shape[0]:
+            raise ValueError(f"X and y have different numbers of samples: {X.shape[0]} and {y.shape[0]}")
         X0 = self._resolve_X0(X0, X.shape[0])
-        
-        print(f"Fitting NW estimator with input_type='{self.input_type}'")
-        print(f"Input shape: {X.shape}, target shape: {y.shape}")
-        if self.task_type == 'regression':
-            print(f"Target statistics: mean={y.mean():.6f}, std={y.std():.6f}, range=[{y.min():.6f}, {y.max():.6f}]")
-        else:
-            labels, counts = np.unique(y, return_counts=True)
-            print(f"Classes: {len(labels)}, samples per class: min={counts.min()}, max={counts.max()}")
-        
-        # Handle classification labels
+
+        self._log(f"Fitting NW estimator: metric_choice='{self.metric_choice}', "
+                  f"input_type='{self.input_type}', X shape {X.shape}")
         if self.task_type == 'classification':
             self.label_encoder_ = LabelEncoder()
-            y_encoded = self.label_encoder_.fit_transform(y)
-            self.classes_ = torch.tensor(np.unique(y_encoded), device=self.device)
-            self.y_train_ = torch.tensor(y_encoded, dtype=torch.float32, device=self.device)
+            y_fit = self.label_encoder_.fit_transform(y)
+            self.classes_ = torch.tensor(np.unique(y_fit), device=self.device)
+            counts = np.bincount(y_fit)
+            self._log(f"Classes: {len(counts)}, samples per class: min={counts.min()}, max={counts.max()}")
         else:
-            self.y_train_ = torch.tensor(y, dtype=torch.float32, device=self.device)
+            y_fit = y
+            self._log(f"Target statistics: mean={y.mean():.6f}, std={y.std():.6f}, "
+                      f"range=[{y.min():.6f}, {y.max():.6f}]")
 
-        if self.metric_choice == "signature_metric":
-            # Compute signatures if needed
-            if self.input_type == 'paths':
-                print("Computing signatures from paths...")
-                X_sig = self._compute_signatures(X)
-                
-                # Check signature quality
-                if np.all(X_sig == 0):
-                    raise ValueError("All computed signatures are zero. Check path data format.")
-                if np.var(X_sig) < 1e-12:
-                    print("WARNING: Very low signature variance. Results may be poor.")
-            else:
-                print("Using pre-computed signatures...")
-                X_sig = X
-                print(f"Signature statistics: mean={X_sig.mean():.6f}, std={X_sig.std():.6f}")
-            
-            # Cross-validation for every hyperparameter that is not fixed
-            needs_cv = self.bandwidth is None or (
-                self.robust and (self.robust_C is None or self.robust_a is None))
-            if needs_cv:
-                print("Starting cross-validation for hyperparameter selection...")
-                self.best_bandwidth_, self.best_signature_level_,self.best_robust_C_, self.best_robust_a_ = self._cross_validate(X,X0, y)
-                print(f"Cross-validation completed. Best bandwidth: {self.best_bandwidth_}")
-            else:
-                print(f"Using provided bandwidth: {self.bandwidth}")
-                self.best_bandwidth_ = self.bandwidth
-                self.best_signature_level_ = self.signature_level
-                self.best_robust_C_ = self.robust_C
-                self.best_robust_a_ = self.robust_a
-            
-            # Store final training data
-            if self.input_type == 'paths':
-                # Recompute with best signature level if needed
-                if self.best_signature_level_ != self.signature_level:
-                    X_sig = self._compute_signatures(X, self.best_signature_level_)
-            
-            # Apply robust signature transformation if enabled
-            if self.robust:
-                X_sig = self._robustsignature(
-                    torch.tensor(X_sig, dtype=torch.float32, device=self.device),
-                    sig_level=self.best_signature_level_,
-                    C=self.best_robust_C_, a_param=self.best_robust_a_
-                ).cpu().numpy()
-            
-            self.X_train_ = torch.tensor(X_sig, dtype=torch.float32, device=self.device)
-            self.X0_train_ = torch.tensor(X0, dtype=torch.float32, device=self.device)
-    
-            
-            print(f"Training completed. Final training data shape: {self.X_train_.shape}")
-            print(f"Using bandwidth: {self.best_bandwidth_}, signature level: {self.best_signature_level_}")
-            if self.robust:
-                print(f"Using robust parameters: C={self.best_robust_C_}, a={self.best_robust_a_}")
-            return self
+        # Cross-validate only if there is something to choose
+        levels, bandwidths, robust_params = self._hyperparameter_candidates()
+        if len(levels) * len(bandwidths) * len(robust_params) > 1:
+            best = self._cross_validate(X, X0, y_fit, levels, bandwidths, robust_params)
         else:
-            if self.bandwidth is None:
-                print("Starting cross-validation for bandwidth selection...")
-                self.best_bandwidth_ = self._cross_validate_non_signature(X,X0, y)
-                print(f"Cross-validation completed. Best bandwidth: {self.best_bandwidth_}")
-            else:
-                print(f"Using provided bandwidth: {self.bandwidth}")
-                self.best_bandwidth_ = self.bandwidth
+            best = (bandwidths[0], levels[0], *robust_params[0])
+        self.best_bandwidth_, self.best_signature_level_, self.best_robust_C_, self.best_robust_a_ = best
 
-            self.X_train_ = torch.tensor(X, dtype=torch.float32, device=self.device)
-            self.X0_train_ = torch.tensor(X0, dtype=torch.float32, device=self.device)
-            
-            print(f"Training completed. Final training data shape: {self.X_train_.shape}")
-            print(f"Using bandwidth: {self.best_bandwidth_}")
-            return self
-            
-            
-        
-    
+        self.X_train_ = self._features(X, self.best_signature_level_, self.best_robust_C_, self.best_robust_a_)
+        if self.metric_choice == "signature_metric" and not torch.any(self.X_train_ != 0):
+            raise ValueError("All computed signatures are zero. Check the path data format: "
+                             "(n_samples, n_timesteps, n_features).")
+        self.X0_train_ = torch.tensor(X0, dtype=torch.float32, device=self.device)
+        self.y_train_ = torch.tensor(y_fit, dtype=torch.float32, device=self.device)
+        self._log(f"Selected {self._describe(*best)}; training data shape {tuple(self.X_train_.shape)}")
+        return self
+
     def _prepare_test_data(self, X: np.ndarray, X0: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Put test data into the representation the model was trained on.
-
-        For the signature metric: signatures at the selected level, robustly
-        normalised with the selected (C, a) if robust=True. For the path
-        metrics: the raw paths. X0 must already be resolved by _resolve_X0.
+        X0 must already be resolved by _resolve_X0.
         """
-        if self.metric_choice == "signature_metric":
-            # Compute signatures if needed
-            if self.input_type == 'paths':
-                X_sig = self._compute_signatures(X, self.best_signature_level_)
-            else:
-                X_sig = X
-
-            # Apply robust signature transformation if enabled
-            if self.robust:
-                X_sig = self._robustsignature(
-                    torch.tensor(X_sig, dtype=torch.float32, device=self.device),
-                    sig_level=self.best_signature_level_,
-                    C=self.best_robust_C_, a_param=self.best_robust_a_
-                ).cpu().numpy()
-
-            X_test = torch.tensor(X_sig, dtype=torch.float32, device=self.device)
-        else:
-            X_test = torch.tensor(X, dtype=torch.float32, device=self.device)
-
+        X_test = self._features(X, self.best_signature_level_, self.best_robust_C_, self.best_robust_a_)
         X0_test = torch.tensor(X0, dtype=torch.float32, device=self.device)
         return X_test, X0_test
 
