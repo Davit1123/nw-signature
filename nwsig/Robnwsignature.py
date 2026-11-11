@@ -43,13 +43,17 @@ class NadarayaWatsonSignature(BaseEstimator):
     robust : bool, optional (default=False)
         Whether to use robust signature transformations.
     robust_C : float, optional (default=None)
-        Robust signature parameter C. If None, will be selected via cross-validation.
+        Robust signature parameter C, must be >= 1. If None, will be selected via
+        cross-validation.
     robust_a : float, optional (default=None)
-        Robust signature parameter a. If None, will be selected via cross-validation.
+        Robust signature parameter a, must be > 0. If None, will be selected via
+        cross-validation.
     robust_C_grid : array-like, optional (default=None)
-        Grid of robust_C values for cross-validation.
+        Grid of robust_C values for cross-validation (all >= 1).
+        If None, uses [1.0, 2.0, 5.0, 10.0].
     robust_a_grid : array-like, optional (default=None)
-        Grid of robust_a values for cross-validation.
+        Grid of robust_a values for cross-validation (all > 0).
+        If None, uses [0.5, 1.0, 1.5, 2.0].
     random_state : int, optional (default=42)
         Random state for reproducibility.
     """
@@ -129,6 +133,16 @@ class NadarayaWatsonSignature(BaseEstimator):
         if self.cv_folds < 2:
             raise ValueError("cv_folds must be >= 2")
 
+        if self.robust:
+            # For C < 1 the robust signature is not defined for paths with small
+            # signatures (no normalising factor exists); a must be positive.
+            for name, values in [("robust_C", self.robust_C), ("robust_C_grid", self.robust_C_grid)]:
+                if values is not None and np.any(np.asarray(values, dtype=float) < 1):
+                    raise ValueError(f"{name} must be >= 1, got {values}")
+            for name, values in [("robust_a", self.robust_a), ("robust_a_grid", self.robust_a_grid)]:
+                if values is not None and np.any(np.asarray(values, dtype=float) <= 0):
+                    raise ValueError(f"{name} must be > 0, got {values}")
+
         if self.robust and self.log_signature:
             raise ValueError(
                 "robust=True cannot be combined with log_signature=True: the robust "
@@ -166,17 +180,30 @@ class NadarayaWatsonSignature(BaseEstimator):
         return [d**k for k in range(1, sig_level + 1)]
 
     def _solve_polynomial_scipy(self, coeffs_np):
-        """Fallback to scipy for polynomial solving."""
+        """
+        Find, for each row, the normalising factor lambda >= 0 of the robust signature.
+
+        coeffs_np has shape (M, 2*sig_level+1), with polynomial coefficients in
+        increasing powers of lambda. For C >= 1 the polynomial is <= 0 at
+        lambda = 0 and >= 0 at lambda = 1, so a root always exists.
+        """
+        if not np.all(np.isfinite(coeffs_np)):
+            raise ValueError("Robust signature: the signatures contain NaN or inf values.")
+
         M = coeffs_np.shape[0]
         roots = np.zeros(M)
-        
+
         for m in range(M):
+            poly = np.poly1d(coeffs_np[m][::-1])
             try:
-                roots[m] = sc.optimize.brentq(np.poly1d(coeffs_np[m][::-1]),0,10000)
-            except:
-                roots[m] = 1.0  # Default value on failure
-                print(f"Warning: Polynomial root finding failed for index {m}")
-        
+                roots[m] = sc.optimize.brentq(poly, 0, 10000)
+            except ValueError as e:
+                raise ValueError(
+                    f"Robust signature: no normalising factor exists for sample {m} "
+                    f"(polynomial value {poly(0):.3g} > 0 at lambda = 0). "
+                    "This happens when robust_C < 1."
+                ) from e
+
         return torch.tensor(roots, dtype=torch.float32)
 
     def _robustsignature(self, X, sig_level, C=1.0, a_param=1.0):
@@ -455,7 +482,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         
         # Set default robust parameter grids
         if self.robust and self.robust_C_grid is None:
-            self.robust_C_grid = [0.5, 1.0, 2.0, 5.0]
+            self.robust_C_grid = [1.0, 2.0, 5.0, 10.0]
         if self.robust and self.robust_a_grid is None:
             self.robust_a_grid = [0.5, 1.0, 1.5, 2.0]
         
@@ -857,6 +884,9 @@ class NadarayaWatsonSignature(BaseEstimator):
         self : object
             Returns self.
         """
+        # Parameters may have been changed via set_params since __init__
+        self._validate_parameters()
+
         X = np.array(X)
         X0 = np.array(X0)
         y = np.array(y)
