@@ -6,11 +6,26 @@ from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.metrics import mean_squared_error, accuracy_score, r2_score
 from sklearn.preprocessing import LabelEncoder
 import iisignature as ii
+import functools
 import inspect
 import warnings
 import scipy as sc
 from typing import Union, Optional, Tuple, List
 from .p_var_vectorized import pvar_backbone_matrix_numba
+
+
+@functools.lru_cache(maxsize=None)
+def _logsig_spec(dim: int, level: int):
+    """
+    iisignature setup for log-signatures of dim-dimensional paths.
+
+    The default method generates machine code at runtime, which fails on some
+    platforms; fall back to the equivalent method without code generation.
+    """
+    try:
+        return ii.prepare(dim, level)
+    except RuntimeError:
+        return ii.prepare(dim, level, "O")
 
 
 class NadarayaWatsonSignature(BaseEstimator):
@@ -35,8 +50,9 @@ class NadarayaWatsonSignature(BaseEstimator):
         Type of input data: 'paths' for raw path data or 'signatures' for pre-computed signatures.
     cv_folds : int, optional (default=5)
         Number of cross-validation folds for hyperparameter selection.
-    signature_mode : int, optional (default=2)
-        iisignature output format (0, 1 or 2). All three give the same signature.
+    signature_mode : int, optional (default=None)
+        Deprecated and ignored: every iisignature output format gives the same
+        signature. Will be removed in a future version.
     bandwidth_grid : array-like, optional (default=None)
         Grid of bandwidth values for cross-validation. If None, uses default grid.
     signature_level_grid : array-like, optional (default=None)
@@ -73,7 +89,7 @@ class NadarayaWatsonSignature(BaseEstimator):
         use_gpu: Optional[bool] = None,
         input_type: str = 'paths',
         cv_folds: int = 5,
-        signature_mode: int = 2,
+        signature_mode: Optional[int] = None,
         log_signature: bool = False,
         bandwidth_grid: Optional[List[float]] = None,
         signature_level_grid: Optional[List[int]] = None,
@@ -140,8 +156,6 @@ class NadarayaWatsonSignature(BaseEstimator):
         if self.cv_folds < 2:
             raise ValueError("cv_folds must be >= 2")
 
-        if self.signature_mode not in (0, 1, 2):
-            raise ValueError("signature_mode must be 0, 1 or 2 (iisignature output format)")
 
         if self.robust:
             # For C < 1 the robust signature is not defined for paths with small
@@ -302,29 +316,11 @@ class NadarayaWatsonSignature(BaseEstimator):
         if sig_level is None:
             sig_level = self.signature_level
         
-        signatures = []
-        
-        # Compute signatures for all paths
+        # iisignature computes a whole batch of paths of shape (n_samples, n_timesteps, d)
+        paths = np.ascontiguousarray(paths, dtype=np.float64)
         if self.log_signature:
-            logsig_spec = ii.prepare(paths.shape[-1], sig_level)
-            for i in range(paths.shape[0]):
-                sig = ii.logsig(paths[i], logsig_spec)
-                signatures.append(sig)
-            
-        else:
-            for i in range(paths.shape[0]):
-                sig = ii.sig(paths[i], sig_level, self.signature_mode)
-
-                if self.signature_mode == 1:
-                    # Format 1: one array per signature level
-                    sig = np.concatenate(sig)
-                elif sig.ndim > 1:
-                    # Format 2: signatures of all prefixes; keep the whole path's
-                    sig = sig[-1, :]
-                
-                signatures.append(sig)
-        
-        return np.array(signatures)
+            return ii.logsig(paths, _logsig_spec(paths.shape[-1], sig_level))
+        return ii.sig(paths, sig_level)
             
         
         
@@ -923,6 +919,12 @@ class NadarayaWatsonSignature(BaseEstimator):
         """
         # Parameters may have been changed via set_params since __init__
         self._validate_parameters()
+        if self.signature_mode is not None:
+            warnings.warn(
+                "signature_mode is deprecated and has no effect: every iisignature output "
+                "format gives the same signature. It will be removed in a future version.",
+                FutureWarning, stacklevel=2,
+            )
 
         X = np.array(X)
         y = np.array(y)
