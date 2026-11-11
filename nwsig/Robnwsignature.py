@@ -31,18 +31,27 @@ def _logsig_spec(dim: int, level: int):
 
 class NadarayaWatsonSignature(BaseEstimator):
     """
-    Nadaraya-Watson estimator using path signatures for regression and classification.
+    Nadaraya-Watson estimator on path space, for regression and classification.
 
-    This estimator implements the Nadaraya-Watson kernel regression/classification
-    using path signatures as features. It supports both raw path data and
-    pre-computed signatures as input.
+    The prediction at a path x is the kernel-weighted average of the training
+    targets,
+
+        m(x) = sum_i w_i(x) y_i,  w_i(x) = exp(-d(x, x_i)^2 / h) / sum_j exp(-d(x, x_j)^2 / h),
+
+    and for classification the predicted class is the one with the largest
+    total weight sum_{i: y_i = c} w_i(x). The distance d is the signature
+    metric ||S(x) - S(y)|| between (robust) signatures truncated at
+    signature_level, or one of the classical path metrics (metric_choice).
+    Hyperparameters that are not fixed are selected by K-fold
+    cross-validation. Inputs are raw paths or pre-computed signatures.
 
     Parameters
     ----------
     signature_level : int, optional (default=2)
         The signature truncation level.
     bandwidth : float, optional (default=None)
-        Kernel bandwidth parameter. If None, will be selected via cross-validation.
+        Kernel bandwidth h in exp(-d^2 / h). If None, will be selected via
+        cross-validation.
     task_type : str, optional (default='regression')
         Type of task: 'regression' or 'classification'.
     use_gpu : bool or None, optional (default=None)
@@ -56,6 +65,8 @@ class NadarayaWatsonSignature(BaseEstimator):
     signature_mode : int, optional (default=None)
         Deprecated and ignored: every iisignature output format gives the same
         signature. Will be removed in a future version.
+    log_signature : bool, optional (default=False)
+        Use log-signatures instead of signatures (not with robust=True).
     bandwidth_grid : array-like, optional (default=None)
         Grid of bandwidth values for cross-validation (used if bandwidth is None).
         If None, uses [0.001, 0.005, 0.01, 0.05, 0.1, 0.5].
@@ -84,8 +95,33 @@ class NadarayaWatsonSignature(BaseEstimator):
         value is ignored. If True, X0 must be passed to fit and predict, and the
         distance becomes |x0 - y0| + rho(x, y), with rho the chosen path metric.
         X0 is used as given (it is not rescaled in robust mode).
+    metric_choice : str, optional (default='signature_metric')
+        Distance between paths: 'signature_metric' (Euclidean distance between
+        the (robust) truncated signatures), 'supremum_metric' (sup_t |x_t - y_t|),
+        'l1' (time average of |x_t - y_t|), 'l2' (root mean square of
+        |x_t - y_t|), 'lp' (p-th root of the time average of |x_t - y_t|^p),
+        'var1' (1-variation of x - y) or 'pvar' (p-variation of x - y). The
+        path metrics compare paths on the same time grid.
+    p_param : float, optional (default=2)
+        Exponent p of metric_choice 'pvar' and 'lp' (p >= 1).
     verbose : bool, optional (default=False)
         Print progress (cross-validation results, selected hyperparameters).
+
+    Attributes
+    ----------
+    best_bandwidth_ : float
+        Bandwidth used for prediction (selected by cross-validation or given).
+    best_signature_level_ : int or None
+        Signature level used (None for the path metrics).
+    best_robust_C_, best_robust_a_ : float or None
+        Robust parameters used (None if robust=False).
+    classes_ : ndarray of shape (n_classes,)
+        Class labels (classification only).
+    X_train_ : torch.Tensor
+        Training data in the representation used by the distance: (robust)
+        signatures for the signature metric, the paths otherwise.
+    device_ : torch.device
+        Device used for the computations.
     """
 
     # Grids used for hyperparameters that are not fixed and have no grid given
@@ -194,7 +230,10 @@ class NadarayaWatsonSignature(BaseEstimator):
             )
 
     def _psi_torch(self, x, C, a):
-        """Vectorized psi function using PyTorch."""
+        """
+        The function psi of the tensor normalisation (Chevyrev and Oberhauser):
+        psi(x) = x^2 for x <= sqrt(C), and C + C^(1+a) (C^(-a) - x^(-2a)) / a otherwise.
+        """
         return torch.where(
             x <= torch.sqrt(torch.tensor(C, dtype=x.dtype, device=x.device)),
             x**2,
@@ -344,8 +383,8 @@ class NadarayaWatsonSignature(BaseEstimator):
 
     def _signature_distance_matrix(self, X1: torch.Tensor, X2: torch.Tensor,Y1: torch.Tensor, Y2: torch.Tensor) -> torch.Tensor:
         """
-        Compute pairwise Euclidean distances between signature vectors.
-        This matches the direct NumPy implementation exactly.
+        Pairwise distances ||X1[i] - X2[j]|| between signature vectors, plus
+        ||Y1[i] - Y2[j]|| between the initial conditions if initial_condition=True.
 
         Parameters
         ----------
@@ -353,6 +392,8 @@ class NadarayaWatsonSignature(BaseEstimator):
             First set of signatures.
         X2 : torch.Tensor of shape (n2, signature_dim)
             Second set of signatures.
+        Y1, Y2 : torch.Tensor of shape (n1, n_features) and (n2, n_features)
+            Initial conditions.
 
         Returns
         -------
@@ -367,23 +408,24 @@ class NadarayaWatsonSignature(BaseEstimator):
 
 
     def _pairwise_path_distance(self,
-                                X1: torch.Tensor,     # (n1, T, d)
-                                X2: torch.Tensor,     # (n2, T, d)
+                                X1: torch.Tensor,
+                                X2: torch.Tensor,
                                 Y1: torch.Tensor,
                                 Y2: torch.Tensor,
-                                kind: str = "sup",    # "sup","l2","l1","lp","var1","pvar_backbone"
-                                weights: Optional[torch.Tensor] = None,  # (T,)
+                                kind: str,
+                                weights: Optional[torch.Tensor] = None,
                                ) -> torch.Tensor:
         """
-        Returns (n1, n2) matrix of path distances between X1 and X2.
+        (n1, n2) matrix of distances between the paths X1 (n1, T, d) and X2 (n2, T, d),
+        plus ||Y1[i] - Y2[j]|| between the initial conditions if initial_condition=True.
 
-        kind:
-          - "sup":   sup_t ||X1[i,t]-X2[j,t]||_2
-          - "l2":    (sum_t w_t * ||...||_2^2)^{1/2}; if weights=None uses 1/T average
-          - "l1":    sum_t w_t * ||...||_2;           if weights=None uses 1/T average
-          - "lp":    (sum_t w_t * ||...||_2^p)^{1/p}
-          - "var1":  sum_k ||ΔX1_k - ΔX2_k||_2   (piecewise linear 1-variation)
-          - "pvar_backbone": p-variation backbone of the difference path
+        kind (|.| is the Euclidean norm, w_t time weights, 1/T if weights is None):
+          - "supremum_metric": max_t |X1[i,t] - X2[j,t]|
+          - "l1":   sum_t w_t |X1[i,t] - X2[j,t]|
+          - "l2":   (sum_t w_t |X1[i,t] - X2[j,t]|^2)^(1/2)
+          - "lp":   (sum_t w_t |X1[i,t] - X2[j,t]|^p)^(1/p), p = p_param
+          - "var1": sum_k |dX1[i,k] - dX2[j,k]|, the 1-variation of the difference path
+          - "pvar": p-variation of the difference path, p = p_param
         """
         p = self.p_param
         n1, T, d = X1.shape
@@ -454,10 +496,7 @@ class NadarayaWatsonSignature(BaseEstimator):
 
     def _nw_predict_regression(self, X_test: torch.Tensor,X0_test: torch.Tensor, X_train: torch.Tensor, X0_train: torch.Tensor,
                               y_train: torch.Tensor, bandwidth: float) -> torch.Tensor:
-        """
-        Nadaraya-Watson regression prediction.
-        This matches the direct NumPy implementation exactly.
-        """
+        """Nadaraya-Watson regression: kernel-weighted average of y_train."""
         # Compute distance matrix: shape (n_test, n_train)
         if self.metric_choice == "signature_metric":
             distances = self._signature_distance_matrix(X_test, X_train,X0_test,X0_train)
@@ -472,7 +511,10 @@ class NadarayaWatsonSignature(BaseEstimator):
 
     def _nw_predict_classification(self, X_test: torch.Tensor,X0_test: torch.Tensor, X_train: torch.Tensor, X0_train: torch.Tensor,
                                   y_train: torch.Tensor, bandwidth: float) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Nadaraya-Watson classification prediction."""
+        """
+        Nadaraya-Watson classification. Returns the predicted class indices and
+        the class probabilities (total kernel weight of each class).
+        """
         if self.metric_choice == "signature_metric":
             distances = self._signature_distance_matrix(X_test, X_train,X0_test,X0_train)
         else:

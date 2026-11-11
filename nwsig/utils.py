@@ -94,7 +94,7 @@ def suggest_truncation_level(n_obs, length, dim, max_sig_dim_total=5e6):
     K = 0
 
     while True:
-        sig_dim = (d**(K + 1) - d) // (d - 1)
+        sig_dim = sum(d**k for k in range(1, K + 1))  # d + d^2 + ... + d^K
         total = n_obs * sig_dim
         if total > max_sig_dim_total:
             return max(K - 1, 1)  # go back one level if exceeded

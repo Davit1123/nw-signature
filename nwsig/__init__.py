@@ -20,6 +20,8 @@ from .metrics import (
 
 from .FBM_package import FBM, fbm, fgn, times
 
+from .p_var_vectorized import p_variation
+
 from .utils import (
     fBm_sampling,
     augment_with_time,
@@ -40,6 +42,7 @@ __all__ = [
     "fbm",
     "fgn",
     "times",
+    "p_variation",
     "fBm_sampling",
     "augment_with_time",
     "suggest_truncation_level"

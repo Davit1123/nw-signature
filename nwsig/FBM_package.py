@@ -1,15 +1,9 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Created on Mon Dec  5 11:09:53 2022
+Simulation of fractional Brownian motion (fBm).
 
-@author:
-"""
-
-"""Generate realizations of fractional Brownian motion, with small change that it also outputs the brownian Motion itself
-
-Borrowed from https://github.com/732jhy/Fractional-Brownian-Motion with small changes
-
+Adapted from https://github.com/732jhy/Fractional-Brownian-Motion, with two
+changes: M paths are simulated at once, and the Brownian motion increments
+generated from the same Gaussian noise are returned as well.
 """
 import warnings
 import time as time
@@ -23,7 +17,6 @@ class FBM(object):
     (default daviesharte), call fbm() for fBm, fgn()
     for fGn, or times() to get corresponding time values.
     """
-    #Zus. für simulationen
 
     def __init__(self,n,M,hurst, length=1, method="daviesharte"):
         """Instantiate the FBM."""
@@ -118,11 +111,13 @@ class FBM(object):
         self._fgn = self._methods[self.method]
         self._changed = True
 
-    #The following function is changed such that it always outputs additionally a Brownian motion from the same sample
-
-
     def fbm(self):
-        """Sample the fractional Brownian motion."""
+        """
+        Sample M fBm paths.
+
+        Returns (fBm of shape (n+1, M), fGn of shape (n, M), Brownian increments
+        of shape (n, M) generated from the same Gaussian noise).
+        """
         F = self.fgn()
         fbm = F[0].cumsum(axis=0) #shape (N,M)
         fBm = np.zeros(shape =(self.n+1,self.M))
@@ -139,9 +134,6 @@ class FBM(object):
         else:
             fgn = self._fgn(gn)
             return fgn * scale, gn.transpose() * scaleBM
-
-        # Scale to interval [0, L]
-
 
     def times(self):
         """Get times associated with the fbm/fgn samples."""

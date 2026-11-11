@@ -1,5 +1,4 @@
-
-#We define different metrics on the space of paths, which are used to define the Nadaraya-Watson estmator.
+"""Distances between paths and error measures used in the examples."""
 import numpy as np
 import iisignature as ii
 import torch
@@ -56,4 +55,3 @@ def MSE(y_true, y_pred):
     Compute the Mean Squared Error (MSE) between true and predicted values.
     """
     return np.mean((y_true - y_pred) ** 2)
-#Todo: p-variation metric/alpha-Hölder metrc
