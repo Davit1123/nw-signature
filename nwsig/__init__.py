@@ -25,6 +25,8 @@ from .sliding_window import (
 
 from .window_tree import WindowTree
 
+from .learned_window import NWLearnedWindowClassifier, multiscale_windows, window_increments_and_areas
+
 from .metrics import (
     MSE,
     supremum_metric,
@@ -55,6 +57,9 @@ __all__ = [
     "sliding_window_signatures",
     "windowed_signature_features",
     "WindowTree",
+    "NWLearnedWindowClassifier",
+    "multiscale_windows",
+    "window_increments_and_areas",
     "MSE",
     "supremum_metric",
     "euclidean_metric",
