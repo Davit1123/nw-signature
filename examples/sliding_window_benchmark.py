@@ -34,6 +34,7 @@ compares, on the fixed train/test splits,
                 on the leave-one-out Brier score, early stopping on 20% of the
                 training samples; the bandwidth then by 5-fold CV accuracy
     learned     the same with the linear channel map learned too
+    learned_ens average of the class probabilities of learned_w and learned
     learned_w_brier, learned_brier
                 the same with the bandwidth minimising the Brier score on the
                 20% validation samples instead (no CV at all)
@@ -81,7 +82,8 @@ DATASETS = ["ArticularyWordRecognition", "AtrialFibrillation", "BasicMotions", "
             "EthanolConcentration", "ERing", "FaceDetection", "FingerMovements", "HandMovementDirection",
             "Handwriting", "Heartbeat", "Libras", "LSST", "NATOPS", "PenDigits", "RacketSports",
             "SelfRegulationSCP1", "SelfRegulationSCP2", "StandWalkJump", "UWaveGestureLibrary"]
-MODELS = ["nb_grid", "global", "global_dil", "window", "auto", "window_l1", "tree", "tree_ce", "tree_random", "learned_w", "learned", "learned_w_brier", "learned_brier"]
+MODELS = ["nb_grid", "global", "global_dil", "window", "auto", "window_l1", "tree", "tree_ce", "tree_random", "learned_w", "learned", "learned_ens", "learned_w_brier",
+          "learned_brier"]
 
 NOTEBOOK_BANDWIDTHS = np.linspace(0.00001, 2.0, 50)
 BANDWIDTH_FACTORS = np.logspace(-4, 1, 41)
@@ -329,6 +331,18 @@ def evaluate(name, models, extract_path=None):
                   f"predict {rows[model]['predict_seconds']:.2f}s, level {clf.level_}, "
                   f"{clf.projection_.shape[0]} channels", flush=True)
 
+    if "learned_ens" in models:
+        t0 = time.time()
+        clfs = [NWLearnedWindowClassifier(level=max(K, 2), time_channel=0, learn_projection=lp).fit(data.X_tr, data.y_tr)
+                for lp in (False, True)]
+        fit_seconds = time.time() - t0
+        t0 = time.time()
+        proba = np.mean([clf.predict_proba(data.X_te) for clf in clfs], axis=0)
+        acc = float(np.mean(clfs[0].classes_[proba.argmax(axis=1)] == data.y_te))
+        rows["learned_ens"] = dict(base, model="learned_ens", accuracy=acc, seconds=fit_seconds,
+                                   predict_seconds=time.time() - t0)
+        print(f"{name:26s} {'learned_ens':11s} test={acc:.4f}  fit {fit_seconds:.1f}s", flush=True)
+
     print(f"{name:26s} ({time.time() - start:.1f}s in total)", flush=True)
     return list(rows.values())
 
@@ -343,7 +357,8 @@ def summary(results, reference=None):
     print("\nMean accuracy: " + ", ".join(f"{m}={acc[m].mean():.4f}" for m in acc))
     pairs = ([("global", m) for m in models if m not in ("nb_grid", "global")]
              + [("window", "window_l1"), ("window", "tree"), ("tree_ce", "tree"), ("window", "learned_w"),
-                ("window", "learned"), ("learned_w", "learned"), ("learned_brier", "learned"),
+                ("window", "learned"), ("learned_w", "learned"), ("learned", "learned_ens"),
+                ("window", "learned_ens"), ("learned_brier", "learned"),
                 ("learned_w_brier", "learned_w"), ("nb_grid", "global")])
     if reference is not None:
         pairs.insert(0, ("ref_nw_kfold", "nb_grid"))

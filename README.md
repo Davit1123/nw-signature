@@ -177,6 +177,7 @@ notebook 01 (results in `examples/results/sliding_window.csv`):
 | `WindowTree` | 0.638 | 986 s |
 | `NWLearnedWindowClassifier`, weights learned | 0.664 | 117 s |
 | `NWLearnedWindowClassifier`, weights and channel map learned | 0.666 | 175 s |
+| average of the class probabilities of the two | 0.670 | 292 s |
 
 Against the signature metric, the CV grid of windows wins on 15 datasets and
 loses on 5 (Wilcoxon p = 0.002), the learned classifier wins on 15 and loses
