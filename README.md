@@ -134,6 +134,58 @@ not the `h` of `exp(-d^2 / h)` used by `NWSignatureRegressor`. With
 leave-one-out. `examples/learned_distance_benchmark.py` compares the variants
 on the classification datasets of notebook 01.
 
+### Windowed and learned multi-scale distances (experimental)
+
+The signature of the whole path is a global summary of it. These additions also
+compare paths locally in time, on windows that are the same for every path:
+
+- `windowed_signature_features(X, level, n_windows, overlap, dilation, window_weight)`
+  returns features whose Euclidean distance is
+  `d^2 = |S(x) - S(y)|^2 + mu * (1/J) * sum_j |S_j(x) - S_j(y)|^2`, with `S_j`
+  the signature of window `j` dilated by `lambda` (level `k` times
+  `lambda^k`); pass them to the estimators with `input_type='signatures'`.
+- `WindowTree` chooses the windows by greedy binary splitting, with the
+  leave-one-out Brier score of the estimator as the splitting criterion.
+- `NWLearnedWindowClassifier` learns the distance. Its windows are the whole
+  path, its halves, quarters and eighths and the windows shifted by half their
+  width; each is represented by its increments and signed (Levy) areas, which
+  follow from prefix sums of the path in O(T). Levels 3..`level` of the
+  signature of the whole path are added through the equivariance
+  `S^k(M x) = M^(⊗k) S^k(x)`, so the signature of `x` is computed once. One
+  weight per (scale, increments or areas) and per level, and a linear channel
+  map `M`, are learned by Adam on the leave-one-out Brier score, with early
+  stopping on 20% of the training samples; the bandwidth is then selected by
+  5-fold CV accuracy.
+
+```python
+from nwsig import NWLearnedWindowClassifier, augment_with_time
+
+# channel 0 of augment_with_time(...) is time, which is passed through unprojected
+model = NWLearnedWindowClassifier(level=3, time_channel=0).fit(X_train, y_train)
+y_pred = model.predict(X_test)
+print(model.block_weights_, model.projection_.shape)
+```
+
+`examples/sliding_window_benchmark.py` compares them on the 21 datasets of
+notebook 01 (results in `examples/results/sliding_window.csv`):
+
+| Model | Mean test accuracy | Fit time, all datasets |
+|---|---|---|
+| signature metric, as in notebook 01 | 0.622 | 26 s |
+| windows, CV grid over their number, overlap, dilation and weight | 0.675 | 1513 s |
+| the same with the windows at level 1 (increments only) | 0.667 | 372 s |
+| `WindowTree` | 0.638 | 986 s |
+| `NWLearnedWindowClassifier`, weights learned | 0.664 | 117 s |
+| `NWLearnedWindowClassifier`, weights and channel map learned | 0.666 | 175 s |
+
+Against the signature metric, the CV grid of windows wins on 15 datasets and
+loses on 5 (Wilcoxon p = 0.002), the learned classifier wins on 15 and loses
+on 4 (p = 0.003); the two do not differ significantly (p = 0.55). The time of
+the grid was measured while the machine was swapping. The variants were
+compared on the same test splits several times, and the bandwidth selection of
+the learned classifier was chosen after seeing them, so the comparison should
+be confirmed on other datasets.
+
 ## Hyperparameter selection
 
 Every hyperparameter that you fix is used as given; every one left as `None` is
