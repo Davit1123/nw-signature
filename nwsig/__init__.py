@@ -17,6 +17,12 @@ from .learned_distance import (
     NWLearnedDistanceClassifier
 )
 
+from .sliding_window import (
+    window_edges,
+    sliding_window_signatures,
+    windowed_signature_features
+)
+
 from .metrics import (
     MSE,
     supremum_metric,
@@ -43,6 +49,9 @@ __all__ = [
     "NWLearnedDistance",
     "NWLearnedDistanceRegressor",
     "NWLearnedDistanceClassifier",
+    "window_edges",
+    "sliding_window_signatures",
+    "windowed_signature_features",
     "MSE",
     "supremum_metric",
     "euclidean_metric",
