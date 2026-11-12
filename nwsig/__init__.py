@@ -23,6 +23,8 @@ from .sliding_window import (
     windowed_signature_features
 )
 
+from .window_tree import WindowTree
+
 from .metrics import (
     MSE,
     supremum_metric,
@@ -52,6 +54,7 @@ __all__ = [
     "window_edges",
     "sliding_window_signatures",
     "windowed_signature_features",
+    "WindowTree",
     "MSE",
     "supremum_metric",
     "euclidean_metric",
